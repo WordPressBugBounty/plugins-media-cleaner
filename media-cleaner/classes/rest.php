@@ -436,16 +436,16 @@ class Meow_WPMC_Rest
 		$search = sanitize_text_field( $request->get_param('search') );
 		$referenceFilter = sanitize_text_field( $request->get_param('referenceFilter') );
 		$table_ref = $wpdb->prefix . "mclean_refs";
-
+	
 		$total = $this->count_references($search, $referenceFilter);
-
+	
 		$where_sql = '';
 		if ($referenceFilter === 'mediaIds') {
 			$where_sql = 'AND mediaId IS NOT NULL';
 		} else if ($referenceFilter === 'mediaUrls') {
 			$where_sql = 'AND mediaUrl IS NOT NULL';
 		}
-
+	
 		$order_sql = 'ORDER BY id DESC';
 		if ( $orderBy === 'id' ) {
 			$order_sql = 'ORDER BY ID IS NULL, ID ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
@@ -456,7 +456,7 @@ class Meow_WPMC_Rest
 		} elseif ( $orderBy === 'originType' ) {
 			$order_sql = 'ORDER BY originType ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
 		}
-
+	
 		$entries = [];
 		if ( empty( $search ) ) {
 			$entries = $wpdb->get_results( 
@@ -471,28 +471,18 @@ class Meow_WPMC_Rest
 		}
 		else {
 			$entries = $wpdb->get_results( 
-				$wpdb->prepare( "SELECT *
-					FROM $table_ref
-					WHERE mediaUrl LIKE %s
+				$wpdb->prepare( "SELECT r.*, p.post_title
+					FROM $table_ref r
+					LEFT JOIN {$wpdb->posts} p ON p.ID = CAST(SUBSTRING(r.originType, LOCATE('[', r.originType) + 1, LOCATE(']', r.originType) - LOCATE('[', r.originType) - 1) AS UNSIGNED)
+					WHERE (r.mediaUrl LIKE %s OR p.post_title LIKE %s)
 					$where_sql
 					$order_sql
-					LIMIT %d, %d", ( '%' . $search . '%' ), $skip, $limit
+					LIMIT %d, %d", ( '%' . $search . '%' ), ( '%' . $search . '%' ), $skip, $limit
 				)
 			);
 		}
-
+	
 		foreach ( $entries as $entry ) {
-			//Try and get a Post Title
-			$originType = $entry->originType;
-			preg_match( '/\[(.*?)\]/', $originType, $matches );
-			if ( isset( $matches[1] ) && is_numeric( $matches[1] ) ){
-				$id = $matches[1];
-				$post_title = get_the_title( $id );
-				if( $post_title ) {
-					$entry->post_title = $post_title;
-				}
-			}
-
 			// Try and get a Media URL (thumbnail)
 			$mediaId = $entry->mediaId;
 			if ( $mediaId ) {
@@ -501,13 +491,13 @@ class Meow_WPMC_Rest
 					$entry->thumbnail = $media[0];
 				}
 			}
-
+	
 			// Same but from MediaUrl if we didn't get one yet
 			$mediaUrl = $entry->mediaUrl;
 			if( $mediaUrl && empty( $entry->thumbnail ) ) {
 				// Get the ID of the attachment from its URL
 				$attachmentId = attachment_url_to_postid( $mediaUrl );
-
+	
 				// Get the thumbnail of the attachment
 				$media = wp_get_attachment_image_src( $attachmentId, 'thumbnail' );
 				if ( $media ) {
@@ -515,8 +505,7 @@ class Meow_WPMC_Rest
 				}
 			}
 		}
-
-
+	
 		return new WP_REST_Response( [ 'success' => true, 'data' => $entries, 'total' => $total ], 200 );
 	}
 
