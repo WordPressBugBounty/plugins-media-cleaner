@@ -913,6 +913,14 @@ class Meow_WPMC_Core {
 		if ( empty( $repair ) ) {
 			return false;
 		}
+
+		// If $repair->path is null or empty return false
+		if ( empty( $repair->path ) ) {
+			$this->log( "🚫 Repair #{$id} does not have a path. Cannot repair this." );
+			return false;
+		}
+
+
 		$repair->id = (int)$repair->id;
 		$regex = "^(.*)(\\s\\(\\+.*)$";
 		$repair->path = preg_replace( '/' . $regex . '/i', '$1', stripslashes( $repair->path ) );
