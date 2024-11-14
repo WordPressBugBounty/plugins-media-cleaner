@@ -457,7 +457,6 @@ class Meow_WPMC_Rest
 			$order_sql = 'ORDER BY originType ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
 		}
 	
-		$entries = [];
 		if ( empty( $search ) ) {
 			$entries = $wpdb->get_results( 
 				$wpdb->prepare( "SELECT *
@@ -468,41 +467,122 @@ class Meow_WPMC_Rest
 					LIMIT %d, %d", $skip, $limit
 				)
 			);
-		}
-		else {
+		} else {
 			$entries = $wpdb->get_results( 
-				$wpdb->prepare( "SELECT r.*, p.post_title
+				$wpdb->prepare( "SELECT r.*
 					FROM $table_ref r
-					LEFT JOIN {$wpdb->posts} p ON p.ID = CAST(SUBSTRING(r.originType, LOCATE('[', r.originType) + 1, LOCATE(']', r.originType) - LOCATE('[', r.originType) - 1) AS UNSIGNED)
-					WHERE (r.mediaUrl LIKE %s OR p.post_title LIKE %s)
+					WHERE (r.mediaUrl LIKE %s)
 					$where_sql
 					$order_sql
-					LIMIT %d, %d", ( '%' . $search . '%' ), ( '%' . $search . '%' ), $skip, $limit
+					LIMIT %d, %d", ( '%' . $search . '%' ), $skip, $limit
 				)
 			);
 		}
 	
+		// Prepare arrays to store IDs and data
+		$post_ids = [];
+		$media_ids = [];
+		$media_urls = [];
+	
+		// Extract post IDs and media IDs/URLs
 		foreach ( $entries as $entry ) {
-			// Try and get a Media URL (thumbnail)
-			$mediaId = $entry->mediaId;
-			if ( $mediaId ) {
-				$media = wp_get_attachment_image_src( $mediaId, 'thumbnail' );
+			// Extract post ID from originType
+			if ( preg_match('/\[(\d+)\]/', $entry->originType, $matches) ) {
+				$post_id = intval( $matches[1] );
+				$entry->post_id = $post_id;
+				$post_ids[] = $post_id;
+			} else {
+				$entry->post_id = null;
+			}
+	
+			// Collect media IDs and URLs
+			if ( $entry->mediaId ) {
+				$media_ids[] = $entry->mediaId;
+			}
+	
+			if ( $entry->mediaUrl ) {
+				$media_urls[] = $entry->mediaUrl;
+			}
+		}
+	
+		// Remove duplicates
+		$post_ids = array_unique( $post_ids );
+		$media_ids = array_unique( $media_ids );
+		$media_urls = array_unique( $media_urls );
+	
+		// Get post titles
+		$post_titles = [];
+		if ( !empty( $post_ids ) ) {
+			$posts = get_posts( array(
+				'include'     => $post_ids,
+				'post_type'   => 'any',
+				'numberposts' => -1,
+			) );
+			foreach ( $posts as $post ) {
+				$post_titles[ $post->ID ] = $post->post_title;
+			}
+		}
+	
+		// Get thumbnails for media IDs
+		$media_thumbnails = [];
+		foreach ( $media_ids as $media_id ) {
+			$media = wp_get_attachment_image_src( $media_id, 'thumbnail' );
+			if ( $media ) {
+				$media_thumbnails[ $media_id ] = $media[0];
+			}
+		}
+	
+		// Map media URLs to attachment IDs and get thumbnails
+		$media_url_to_id = [];
+		foreach ( $media_urls as $media_url ) {
+			$attachment_id = attachment_url_to_postid( $media_url );
+			if ( $attachment_id ) {
+				$media_url_to_id[ $media_url ] = $attachment_id;
+				$media = wp_get_attachment_image_src( $attachment_id, 'thumbnail' );
 				if ( $media ) {
-					$entry->thumbnail = $media[0];
+					$media_thumbnails[ $attachment_id ] = $media[0];
+				}
+			}
+		}
+	
+		// Get the uploads directory URL
+		$upload_dir = wp_upload_dir();
+		$upload_baseurl = $upload_dir['baseurl'];
+	
+		// Assign post titles and thumbnails to entries
+		foreach ( $entries as $entry ) {
+			// Assign post title
+			if ( isset( $entry->post_id ) && isset( $post_titles[ $entry->post_id ] ) ) {
+				$entry->post_title = $post_titles[ $entry->post_id ];
+			} else {
+				$entry->post_title = '';
+			}
+	
+			// Assign thumbnail
+			$entry->thumbnail = '';
+	
+			if ( $entry->mediaId && isset( $media_thumbnails[ $entry->mediaId ] ) ) {
+				$entry->thumbnail = $media_thumbnails[ $entry->mediaId ];
+			} elseif ( $entry->mediaUrl && isset( $media_url_to_id[ $entry->mediaUrl ] ) ) {
+				$attachment_id = $media_url_to_id[ $entry->mediaUrl ];
+				if ( isset( $media_thumbnails[ $attachment_id ] ) ) {
+					$entry->thumbnail = $media_thumbnails[ $attachment_id ];
 				}
 			}
 	
-			// Same but from MediaUrl if we didn't get one yet
-			$mediaUrl = $entry->mediaUrl;
-			if( $mediaUrl && empty( $entry->thumbnail ) ) {
-				// Get the ID of the attachment from its URL
-				$attachmentId = attachment_url_to_postid( $mediaUrl );
-	
-				// Get the thumbnail of the attachment
-				$media = wp_get_attachment_image_src( $attachmentId, 'thumbnail' );
-				if ( $media ) {
-					$entry->thumbnail = $media[0];
+			// If thumbnail is still empty, use mediaUrl as thumbnail
+			if ( empty( $entry->thumbnail ) && $entry->mediaUrl ) {
+				// Ensure mediaUrl is absolute
+				if ( strpos( $entry->mediaUrl, 'http' ) !== 0 ) {
+					$entry->thumbnail = $upload_baseurl . '/' . ltrim( $entry->mediaUrl, '/' );
+				} else {
+					$entry->thumbnail = $entry->mediaUrl;
 				}
+			}
+	
+			// Ensure thumbnail is absolute URL ( for sizes of medias )
+			if ( !empty( $entry->thumbnail ) && strpos( $entry->thumbnail, 'http' ) !== 0 ) {
+				$entry->thumbnail = $upload_baseurl . '/' . ltrim( $entry->thumbnail, '/' );
 			}
 		}
 	
@@ -638,6 +718,15 @@ class Meow_WPMC_Rest
 			if ( $entry->type == 0 ) {
 				$entry->thumbnail_url = htmlspecialchars( trailingslashit( $base ) . $entry->path, ENT_QUOTES );
 				$entry->image_url = $entry->thumbnail_url;
+
+				// If the extension is not an image, we set the thumbnail to null
+				$ext = pathinfo( $entry->path, PATHINFO_EXTENSION );
+				if ( !$this->core->is_image_extension( $ext ) ) {
+					$entry->thumbnail_url = null;
+				}
+
+				
+
 			}
 			// MEDIA
 			else {

@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 6.8.1
+Stable tag: 6.8.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -47,10 +47,15 @@ This plugin is compatible with all media types, including retina and WebP versio
 
 == Changelog ==
 
+= 6.8.2 (2024/11/14) =
+* Update: Enhanced the UI in many little ways.
+* Update: Don't show the thumbnails for non-image files.
+* Fix: Better parser for Avada.
+* Info: We are working hard on Media Cleaner. If you want to share some love, write a simple and nice review [here](https://wordpress.org/support/plugin/media-cleaner/reviews/?rate=5#new-post). Thank you so much! 💖
+
 = 6.8.1 (2024/11/04) =
 * Add: Check for empty path in repair mode.
 * Add: Introduction tutorial.
-* Info: We are working hard on Media Cleaner. If you want to share some love, write a simple and nice review [here](https://wordpress.org/support/plugin/media-cleaner/reviews/?rate=5#new-post). Thank you so much! 💖
 
 = 6.8.0 (2024/10/17) =
 * Fix: Search in References (Cleaner Dashboard).

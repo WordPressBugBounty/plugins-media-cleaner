@@ -1618,6 +1618,15 @@ class Meow_WPMC_Core {
 		}
 	}
 
+	function is_image_extension( $ext ) {
+		$ext = strtolower( $ext );
+		$valid = apply_filters( 'wpmc_valid_image_extensions', array( 'jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'ico', 'webp', 'avif' ) );
+
+		return in_array( $ext, $valid );
+
+	}
+		
+
 	function reset_references() {
 		global $wpdb;
 		$table_name = $wpdb->prefix . "mclean_refs";
