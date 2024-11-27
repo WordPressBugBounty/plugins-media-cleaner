@@ -254,11 +254,14 @@ class Meow_WPMC_Core {
 		// Proposal/fix by @copytrans
 		// Discussion: https://wordpress.org/support/topic/bug-in-core-php/#post-11647775
 		// Modified by Jordy again in 2021 for those who don't have MB enabled
-		if ( function_exists( 'mb_convert_encoding' ) ) {
-			$html = mb_convert_encoding( $html, 'HTML-ENTITIES', 'UTF-8' );
+		if ( function_exists( 'htmlspecialchars' ) ) {
+			$html = htmlspecialchars( $html, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 		}
-		else {
-			$html = htmlspecialchars_decode( utf8_decode( htmlentities( $html, ENT_COMPAT, 'utf-8', false ) ) );
+		else if ( function_exists( 'mb_encode_numericentity' ) ) {
+			$convmap = array( 0x80, 0xFFFF, 0, 0xFFFF );
+			$html = mb_encode_numericentity( $html, $convmap, 'UTF-8' );
+		} else {
+			$html = htmlentities( $html, ENT_COMPAT, 'UTF-8' );
 		}
 
 		// Resolve src-set and shortcodes
