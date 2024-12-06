@@ -32,6 +32,8 @@ class Meow_WPMC_Core {
 
 	function plugins_loaded() {
 
+
+
 		// Variables
 		$this->site_url = get_site_url();
 		$this->multilingual = $this->is_multilingual();
@@ -245,7 +247,7 @@ class Meow_WPMC_Core {
 		}
 	}
 
-	function get_urls_from_html( $html ) {
+	function get_urls_from_html( $html, $skip_encoding = false ) {
 		if ( empty( $html ) ) {
 			return array();
 		}
@@ -254,14 +256,15 @@ class Meow_WPMC_Core {
 		// Proposal/fix by @copytrans
 		// Discussion: https://wordpress.org/support/topic/bug-in-core-php/#post-11647775
 		// Modified by Jordy again in 2021 for those who don't have MB enabled
-		if ( function_exists( 'htmlspecialchars' ) ) {
-			$html = htmlspecialchars( $html, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-		}
-		else if ( function_exists( 'mb_encode_numericentity' ) ) {
-			$convmap = array( 0x80, 0xFFFF, 0, 0xFFFF );
-			$html = mb_encode_numericentity( $html, $convmap, 'UTF-8' );
-		} else {
-			$html = htmlentities( $html, ENT_COMPAT, 'UTF-8' );
+		if ( !$skip_encoding ) {
+			if (function_exists('htmlspecialchars')) {
+				$html = htmlspecialchars($html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+			} else if (function_exists('mb_encode_numericentity')) {
+				$convmap = array(0x80, 0xFFFF, 0, 0xFFFF);
+				$html = mb_encode_numericentity($html, $convmap, 'UTF-8');
+			} else {
+				$html = htmlentities($html, ENT_COMPAT, 'UTF-8');
+			}
 		}
 
 		// Resolve src-set and shortcodes
@@ -444,6 +447,37 @@ class Meow_WPMC_Core {
 		return $results;
 	}
 
+	/**
+	 * 
+	 *  Get the IDs and URLs from the blocks of a post.
+	 * 
+	 * @param string $html The HTML content of the post.
+	 * @param string $prefix The prefix of the blocks to look for.
+	 * @param array $keys The keys to look for in the blocks.
+	 * @param array $urls The array to fill with the URLs.
+	 * @param array $ids The array to fill with the IDs.
+	 * 
+	 */
+	function get_from_blocks( $html, $prefix, $keys, &$urls, &$ids ) {
+
+		$data = parse_blocks( $html );
+
+		if ( ! is_array( $data )  || ! isset( $data[0] ) ) {
+			return;
+		}
+	
+		if ( strpos( $data[0]['blockName'], $prefix ) === false ) {
+			return;
+		}
+	
+		$this->get_from_meta(
+			$data,
+			$keys,
+			$ids,
+			$urls
+		);
+		
+	}
 	// Parse a meta, visit all the arrays, look for the attributes, fill $ids and $urls arrays
 	// If rawMode is enabled, it will not check if the value is an ID or an URL, it will just returns it in URLs
 	function get_from_meta( $meta, $lookFor, &$ids, &$urls, $rawMode = false ) {

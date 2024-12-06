@@ -169,8 +169,8 @@ class MeowApps_WPMC_Parser_Common {
 					}
 				}
 			}
-			$wpmc->add_reference_id( $postmeta_images_ids, 'META (ID)', $id );
-			$wpmc->add_reference_id( $postmeta_images_urls, 'META (URL)', $id );
+			$wpmc->add_reference_id( $postmeta_images_ids, 'POST META (ID)', $id );
+			$wpmc->add_reference_id( $postmeta_images_urls, 'POST META (URL)', $id );
 		}
 	}
 }

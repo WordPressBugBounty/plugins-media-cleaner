@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 6.8.3
+Stable tag: 6.8.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -20,6 +20,8 @@ Use it alongside [Database Cleaner](https://wordpress.org/plugins/database-clean
 Media Cleaner is like a ninja assassin for your Media Library - it'll stealthily take out all the unnecessary media and broken entries that are cluttering up the place. Just make sure you have a **solid backup plan** in place before you let this bad boy loose. 
 
 To learn more about compatibility, features, and the Pro version, check out the [tutorial](https://meowapps.com/media-cleaner/tutorial/) on the [official website](https://meowapps.com/media-cleaner/).
+
+[youtube https://www.youtube.com/watch?v=qmDSgWZWnSw]
 
 === COMPATIBILITY ===
 
@@ -47,10 +49,15 @@ This plugin is compatible with all media types, including retina and WebP versio
 
 == Changelog ==
 
+= 6.8.4 (2024/12/06) =
+* Add: Support for Spectra.
+* Add: Support for Tutor LMS.
+* Add: Support for Foo Gallery.
+* Info: We are working hard on Media Cleaner. If you want to share some love, write a simple and nice review [here](https://wordpress.org/support/plugin/media-cleaner/reviews/?rate=5#new-post). Thank you so much! 💖
+
 = 6.8.3 (2024/11/27) =
 * Fix: MetaBox parser was not working properly.
 * Fix: The free version of Media Cleaner was not properly displaying the incompatible plugins.
-* Info: We are working hard on Media Cleaner. If you want to share some love, write a simple and nice review [here](https://wordpress.org/support/plugin/media-cleaner/reviews/?rate=5#new-post). Thank you so much! 💖
 
 = 6.8.2 (2024/11/14) =
 * Update: Enhanced the UI in many little ways.
