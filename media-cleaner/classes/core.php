@@ -199,14 +199,14 @@ class Meow_WPMC_Core {
 	}
 
 	function get_favicon() {
-		// Yoast SEO plugin
-		$vals = get_option( 'wpseo_titles' );
-		if ( !empty( $vals ) ) {
-			$url = $vals['company_logo'];
-			if ( $this->is_url( $url ) )
-				return $this->clean_url( $url );
+			// Yoast SEO plugin
+			$vals = get_option( 'wpseo_titles' );
+			if ( !empty( $vals ) && isset( $vals['company_logo'] ) ) {
+				$url = $vals['company_logo'];
+				if ( $this->is_url( $url ) )
+					return $this->clean_url( $url );
+			}
 		}
-	}
 
 	function get_shortcode_attributes( $shortcode_tag, $post ) {
 		if ( has_shortcode( $post->post_content, $shortcode_tag ) ) {
@@ -247,7 +247,7 @@ class Meow_WPMC_Core {
 		}
 	}
 
-	function get_urls_from_html( $html, $skip_encoding = false ) {
+	function get_urls_from_html( $html ) {
 		if ( empty( $html ) ) {
 			return array();
 		}
@@ -256,15 +256,17 @@ class Meow_WPMC_Core {
 		// Proposal/fix by @copytrans
 		// Discussion: https://wordpress.org/support/topic/bug-in-core-php/#post-11647775
 		// Modified by Jordy again in 2021 for those who don't have MB enabled
-		if ( !$skip_encoding ) {
-			if (function_exists('htmlspecialchars')) {
-				$html = htmlspecialchars($html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-			} else if (function_exists('mb_encode_numericentity')) {
-				$convmap = array(0x80, 0xFFFF, 0, 0xFFFF);
-				$html = mb_encode_numericentity($html, $convmap, 'UTF-8');
-			} else {
-				$html = htmlentities($html, ENT_COMPAT, 'UTF-8');
-			}
+		if ( function_exists( 'mb_encode_numericentity' ) ) {
+			$convmap = [0x80, 0xffff, 0, 0xffff];
+			$html = mb_encode_numericentity( $html, $convmap, 'UTF-8' );
+		} else {
+			$html = preg_replace_callback(
+				'/[\x80-\xFF]/',
+				function( $match ) {
+					return '&#' . ord( $match[0] ) . ';';
+				},
+				$html
+			);
 		}
 
 		// Resolve src-set and shortcodes
@@ -359,7 +361,7 @@ class Meow_WPMC_Core {
 		}
 
 		// Videos: src, poster, and attached file
-		$videos = $dom->getElementsByTagName('video');
+		$videos = $dom->getElementsByTagName( 'video' );
 		foreach ($videos as $video) {
 			// Get src attribute
 			$raw_video_src = $video->getAttribute( 'src' );

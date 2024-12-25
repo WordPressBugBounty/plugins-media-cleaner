@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 6.8.4
+Stable tag: 6.8.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,11 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 6.8.5 (2024/12/25) =
+* Fix: HTML needs to be well-decoded before being sent to DOMDocument.
+* Fix: Avoid an issue related to logos.
+* Info: Merry Christmas and Happy New Year! 🎄🎉
 
 = 6.8.4 (2024/12/06) =
 * Add: Support for Spectra.
