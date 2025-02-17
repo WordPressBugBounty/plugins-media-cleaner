@@ -284,6 +284,7 @@ class Meow_WPMC_Core {
 			throw new Error( 'The DOM extension for PHP is not installed.' );
 		}
 
+		
 		if ( empty( $html ) ) {
 			return array();
 		}
@@ -1382,6 +1383,20 @@ class Meow_WPMC_Core {
 		}
 
 		return $ret;
+	}
+
+	function get_thumbnails_urls( $id, $sizes_as_key = false ) {
+		$sizes = get_intermediate_image_sizes();
+		// For each size use wp_get_attachment_image_src() to get the URL
+		$urls = array();
+		foreach ( $sizes as $size ) {
+			$src = wp_get_attachment_image_src( $id, $size );
+			if ( $src ) {
+				$urls[$size] = $this->clean_url( $src[0] );
+			}
+		}
+
+		return $sizes_as_key ? $urls : array_values( $urls );
 	}
 
 	function get_image_sizes() {
