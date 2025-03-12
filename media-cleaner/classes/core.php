@@ -8,7 +8,7 @@ class Meow_WPMC_Core {
 	public $is_pro = false;
 	public $engine = null;
 	public $catch_timeout = true; // This will halt the plugin before reaching the PHP timeout.
-	public $types = "jpg|jpeg|jpe|gif|png|tiff|bmp|csv|svg|pdf|xls|xlsx|doc|docx|odt|wpd|rtf|tiff|mp3|mp4|mov|wav|lua";
+	public $types = "jpg|jpeg|jpe|gif|png|tiff|bmp|csv|svg|pdf|xls|xlsx|doc|docx|odt|wpd|rtf|tiff|mp3|mp4|mov|wav|lua|webp|avif|ico";
 	public $current_method = 'media';
 	public $servername = null; // meowapps.com (site URL without http/https)
 	public $site_url = null; // https://meowapps.com
