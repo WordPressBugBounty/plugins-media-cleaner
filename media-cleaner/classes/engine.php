@@ -109,7 +109,7 @@ SQL;
 			}
 
 			// Extra scanning methods
-			do_action( 'wpmc_scan_extra', $post );
+			// do_action( 'wpmc_scan_extra', $post );
 
 			$this->core->timeout_check_additem();
 		}

@@ -23,6 +23,8 @@ class Meow_WPMC_Core {
 	private $multilingual = false;
 	private $languages = array();
 
+	private $ref_index_exists = false;
+
 	public function __construct() {
 		add_action( 'plugins_loaded', array( $this, 'plugins_loaded' ) );
 		add_action( 'init', array( $this, 'init' ) );
@@ -176,19 +178,31 @@ class Meow_WPMC_Core {
 		return $filename;
 	}
 
-	function array_to_ids_or_urls( &$meta, &$ids, &$urls ) {
+	function array_to_ids_or_urls( &$meta, &$ids, &$urls, $recursive = false, $filters = array() ) {
 		foreach ( $meta as $k => $m ) {
 			if ( is_numeric( $m ) ) {
 				// Probably a Media ID
 				if ( $m > 0 )
+				{
 					array_push( $ids, $m );
+				}
 			}
 			else if ( is_array( $m ) ) {
 				// If it's an array with a width, probably that the index is the Media ID
 				if ( isset( $m['width'] ) && is_numeric( $k ) ) {
 					if ( $k > 0 )
+					{
 						array_push( $ids, $k );
+					}
+
+					continue;
 				}
+				
+				if ( $recursive ) {
+					// If it's an array, we need to go deeper
+					$this->array_to_ids_or_urls( $m, $ids, $urls, true );
+				}
+
 			}
 			else if ( !empty( $m ) ) {
 				// If it's a string, maybe it's a file (with an extension)
@@ -208,7 +222,64 @@ class Meow_WPMC_Core {
 			}
 		}
 
-	function get_shortcode_attributes( $shortcode_tag, $post ) {
+	function get_all_shortcodes_attributes( $html, $ids_attr = array(), $urls_attr = array() ) {
+		// Get all the shortcodes from html, and check for each attributes of the shortcode if it is an ID or a URL and add the value in an array to return
+		$urls_values = array();
+		$ids_values = array();
+
+		$pattern = get_shortcode_regex();
+		if ( preg_match_all( '/'. $pattern .'/s', $html, $matches ) )
+		{
+			foreach( $matches[0] as $key => $value) {
+				// $matches[3] return the shortcode attribute as string
+				// replace space with '&' for parse_str() function
+				$get = str_replace(" ", "&" , trim( $matches[3][$key] ) );
+				$get = str_replace('"', '' , $get );
+				parse_str( $get, $sub_output );
+
+				foreach ( $sub_output as $attr_key => $attr_value ) {
+
+					if ( in_array( $attr_key, $ids_attr ) ) {
+						if ( is_numeric( $attr_value ) && !in_array( (int)$attr_value, $ids_values ) ) {
+							array_push( $ids_values, (int)$attr_value );
+						}
+
+						// In case of separated by commas
+						else if ( strpos( $attr_value, ',' ) !== false ) {
+							$attr_value = str_replace(' ', '', $attr_value );
+							$pieces = explode( ',', $attr_value );
+							foreach ( $pieces as $pval ) {
+								if ( is_numeric( $pval ) && !in_array( (int)$pval, $ids_values ) ) {
+									array_push( $ids_values, (int)$pval );
+								}
+							}
+						}
+					}
+
+					else if ( in_array( $attr_key, $urls_attr ) ) {
+						if ( !empty( trim( $attr_value ) ) && !in_array( trim( $attr_value ), $urls_values ) && !is_numeric( trim( $attr_value ) ) && strpos( trim( $attr_value ), 'http' ) !== false ) {
+							array_push( $urls_values, trim( $this->clean_url( $attr_value ) ) );
+						}
+					}
+				}
+			}
+		}
+
+		// Remove duplicates
+		$urls_values = array_unique( $urls_values );
+		$ids_values  = array_unique( $ids_values );
+
+		// Return the values
+		$values = array(
+			'urls' => $urls_values,
+			'ids' => $ids_values
+		);
+
+		return $values;
+
+	}
+	
+		function get_shortcode_attributes( $shortcode_tag, $post ) {
 		if ( has_shortcode( $post->post_content, $shortcode_tag ) ) {
 			$output = array();
 			//get shortcode regex pattern wordpress function
@@ -1148,6 +1219,44 @@ class Meow_WPMC_Core {
 		return false;
 	}
 
+	function delete_directory_recurcively( $dir ) {
+		if ( !is_dir( $dir ) ) {
+			return;
+		}
+		$files = array_diff( scandir( $dir ), array( '.', '..' ) );
+		foreach ( $files as $file ) {
+			if ( is_dir( "$dir/$file" ) ) {
+				$this->delete_directory_recurcively( "$dir/$file" );
+			}
+			else {
+				unlink( "$dir/$file" );
+			}
+		}
+		rmdir( $dir );
+	}
+
+	function force_trash() {
+
+		$res = [
+			'message' => 'The trash folder has been emptied.',
+			'success' => true
+		];
+
+		// Delete all the files in the trash folder.
+		$trashDirPath = trailingslashit( $this->get_trashdir() );
+		if ( file_exists( $trashDirPath ) && is_dir( $trashDirPath ) ) {
+			$this->delete_directory_recurcively( $trashDirPath, true );
+		}
+	
+		// Clean the Database: DELETE FROM wp_mclean_scan WHERE deleted = 1
+		global $wpdb;
+		$table_name = $wpdb->prefix . "mclean_scan";
+		$wpdb->query( $wpdb->prepare( "DELETE FROM $table_name WHERE deleted = 1" ) );
+		
+
+		return $res;
+	}
+
 	/**
 	 *
 	 * SCANNING / RESET
@@ -1399,6 +1508,26 @@ class Meow_WPMC_Core {
 		return $sizes_as_key ? $urls : array_values( $urls );
 	}
 
+	function get_thumbnails_urls_from_srcset( $id, $size = 'medium'  ) {
+		$srcset = wp_get_attachment_image_srcset( $id, $size );
+
+		// Extract URLs from srcset
+		$urls = array();
+		if ( !empty( $srcset ) ) {
+			$srcset = explode( ', ', $srcset );
+			foreach ( $srcset as $src ) {
+				$parts = explode( ' ', $src );
+				$url = trim( $parts[0] );
+				if ( !empty( $url ) ) {
+					$urls[] = $this->clean_url( $url );
+				}
+			}
+		}
+		
+		return $urls;
+
+	}
+
 	function get_image_sizes() {
 		$sizes = array();
 		global $_wp_additional_image_sizes;
@@ -1419,6 +1548,8 @@ class Meow_WPMC_Core {
 	}
 
 	function clean_url_from_resolution( $url ) {
+		if ( !isset( $url ) ) return $url;
+
 		$pattern = '/[_-]\d+x\d+(?=\.[a-z]{3,4}$)/';
 		$url = preg_replace( $pattern, '', $url );
 		return $url;
@@ -1519,7 +1650,10 @@ class Meow_WPMC_Core {
 	*/
 	public function reference_exists( $file, $mediaId ) {
 		global $wpdb;
+
 		$table = $wpdb->prefix . "mclean_refs";
+		$this->create_mediaId_index( $table );
+
 		$row = null;
 		if ( !empty( $mediaId ) ) {
 			$row = $wpdb->get_row( $wpdb->prepare( "SELECT originType FROM $table WHERE mediaId = %d", $mediaId ) );
@@ -1538,6 +1672,20 @@ class Meow_WPMC_Core {
 			}
 		}
 		return false;
+	}
+
+	function create_mediaId_index( $table ) {
+		if ( $this->ref_index_exists ) return;
+
+		global $wpdb;
+		// If the index already exists, return
+		$index = $wpdb->get_results( "SHOW INDEX FROM {$wpdb->prefix}mclean_refs WHERE Key_name = 'mediaId_index'" );
+		if ( !empty( $index ) ) {
+			$this->ref_index_exists = true;
+			return;
+		}
+
+		$wpdb->query("CREATE INDEX mediaId_index ON $table (mediaId)");
 	}
 
 	function get_full_upload_path( $relative_path ) {

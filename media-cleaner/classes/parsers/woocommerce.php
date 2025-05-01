@@ -53,10 +53,20 @@ function wpmc_scan_postmeta_woocommerce( $id ) {
 	$id = (int)$id;
 	$res = $wpdb->get_col( "SELECT meta_value FROM $wpdb->postmeta WHERE post_id = $id
 		AND meta_key = '_product_image_gallery'" );
+
 	foreach ( $res as $values ) {
+		
 		$ids = explode( ',', $values );
 		$galleries_images_wc = array_merge( $galleries_images_wc, $ids );
 	}
+
+	foreach ( $galleries_images_wc as $thumbnail_id ) {
+
+		//* WooCommerce Gallery Images use srcset so the sizes URL are actually used
+		$urls = $wpmc->get_thumbnails_urls_from_srcset( $thumbnail_id );
+		$wpmc->add_reference_url( $urls, 'WOOCOMMERCE GALLERY (URL) {SAFE}', $id );
+	}
+
 	$wpmc->add_reference_id( $galleries_images_wc, 'WOOCOOMMERCE GALLERY (ID)', $id );
 }
 
