@@ -22,6 +22,7 @@ class Meow_WPMC_Core {
 	private $debug_logs = null;
 	private $multilingual = false;
 	private $languages = array();
+	private $shortcode_analysis = false;
 
 	private $ref_index_exists = false;
 
@@ -50,6 +51,7 @@ class Meow_WPMC_Core {
 		$this->debug_logs = $this->get_option( 'debuglogs' );
 		$this->is_rest = MeowCommon_Helpers::is_rest();
 		$this->is_cli = defined( 'WP_CLI' ) && WP_CLI;
+		$this->shortcode_analysis = !$this->get_option( 'shortcodes_disabled' );
 		
 		global $wpmc;
 		$wpmc = $this;
@@ -341,7 +343,7 @@ class Meow_WPMC_Core {
 		}
 
 		// Resolve src-set and shortcodes
-		if ( !$this->get_option( 'shortcodes_disabled' ) ) {
+		if ( $this->shortcode_analysis ) {
 			$html = do_shortcode( $html );
 		}
 

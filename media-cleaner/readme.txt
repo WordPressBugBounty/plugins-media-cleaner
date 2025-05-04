@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 6.8.8
+Stable tag: 6.8.9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,10 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 6.8.9 (2025/05/04) =
+* Fix: Ensure the "Disable Shortcode Analysis" setting is now respected in all content parsers.
+* Add: Support for ACF 'file' fields now includes returning the file URL when using ID references.
 
 = 6.8.8 (2025/05/01) =
 * Add: Introduced SAFE support for URLs from srcset in WooCommerce galleries.
