@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 6.9.0
+Stable tag: 6.9.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 6.9.1 (2025/06/29) =
+* Add: Support for Kadence Blocks.
+* Add: Support for Salient Theme Elements.
+* Add: Support for Houzez Theme.
+* Add: Support for WooCommerce variation galleries.
+* Update: Improved Enfold parser with better handling of nested shortcodes and enhanced ID/URL extraction.
 
 = 6.9.0 (2025/05/11) =
 * Update: Removed unused code for live content checks in CLI commands to improve plugin performance and maintainability.
