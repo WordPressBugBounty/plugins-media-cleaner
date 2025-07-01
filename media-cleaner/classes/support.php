@@ -221,6 +221,11 @@ class Meow_WPMC_Support {
 			array_push( $unsupported, 'Kadence Blocks' );
 		}
 
+    // FLuent Forms
+		if ( defined( 'FLUENTFORM_VERSION' ) ) {
+      array_push( $unsupported, 'Fluent Forms' );
+    }
+
     return $unsupported;
   }
 }

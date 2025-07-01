@@ -1738,24 +1738,63 @@ class Meow_WPMC_Core {
 		return $sizes_as_key ? $urls : array_values( $urls );
 	}
 
-	function get_thumbnails_urls_from_srcset( $id, $size = 'medium'  ) {
-		$srcset = wp_get_attachment_image_srcset( $id, $size );
 
-		// Extract URLs from srcset
+	function get_thumbnails_urls_from_srcset( $id, $size = 'full'  ) {
+
+		$image_size = $this->get_attachment_size_by_id( $id, $size );
+
+		$sizes = array_keys( $this->get_image_sizes() );
+		$sizes[] = $image_size;
+
 		$urls = array();
-		if ( !empty( $srcset ) ) {
-			$srcset = explode( ', ', $srcset );
-			foreach ( $srcset as $src ) {
-				$parts = explode( ' ', $src );
-				$url = trim( $parts[0] );
-				if ( !empty( $url ) ) {
-					$urls[] = $this->clean_url( $url );
+		foreach ( $sizes as $image_size ) {
+			$srcset     = wp_get_attachment_image_srcset( $id, $image_size );
+
+			// Extract URLs from srcset
+			if ( !empty( $srcset ) ) {
+				$srcset = explode( ', ', $srcset );
+				foreach ( $srcset as $src ) {
+					$parts = explode( ' ', $src );
+					$url = trim( $parts[0] );
+					if ( !empty( $url ) ) {
+						$urls[] = $this->clean_url( $url );
+					}
 				}
 			}
 		}
 		
 		return $urls;
 
+	}
+
+	function get_attachment_size_by_id( $attachment_id, $default_size = 'full' ) {
+
+		if ( ! $attachment_id ) {
+			return $default_size;
+		}
+
+		$url = wp_get_attachment_url( $attachment_id );
+		if ( ! $url ) {
+			return $default_size;
+		}
+
+		$metadata = wp_get_attachment_metadata( $attachment_id );
+
+		if ( ! is_array( $metadata ) ) {
+			return $default_size;
+		}
+
+		$size = $default_size;
+
+		if ( isset( $metadata['file'] ) && strpos( $url, $metadata['file'] ) === ( strlen( $url ) - strlen( $metadata['file'] ) ) ) {
+			$size = array( $metadata['width'], $metadata['height'] );
+		} elseif ( preg_match( '/-(\d+)x(\d+)\.(jpg|jpeg|gif|png|svg|webp)$/', $url, $match ) ) {
+			// Get the image width and height.
+			// Example: https://regex101.com/r/7JwGz7/1.
+			$size = array( $match[1], $match[2] );
+		}
+
+		return $size;
 	}
 
 	function get_image_sizes() {
@@ -1821,7 +1860,7 @@ class Meow_WPMC_Core {
 		$url = preg_replace('/\?.*/', '', $url);
 		
 		// Try to find the attachment ID by matching the URL with the guid
-		$attachment = $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE guid LIKE %s;", $url ) );
+		$attachment = $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE guid LIKE %s AND post_type = 'attachment';", '%' . $wpdb->esc_like( $url ) ) );
 		
 		// If found, return the first attachment ID
 		if ( !empty( $attachment ) ) {
