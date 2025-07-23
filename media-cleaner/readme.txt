@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 6.9.2
+Stable tag: 6.9.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 6.9.3 (2025/07/23) =
+* Add: Enhanced the resume functionality.  
+* Fix: Hotfix for errorCounts modal display to ensure proper visibility.  
+* Update: Show incompatible plugins message only in the free version for clarity.  
+* Update: Improved memory management by replacing in-memory references with direct processing and transients.  
+* Update: Refreshed common libraries for better performance and stability.
 
 = 6.9.2 (2025/07/01) =
 * Add: Added support for Fluent Forms.
