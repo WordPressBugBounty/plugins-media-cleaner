@@ -343,12 +343,11 @@ class Meow_WPMC_Rest
 
 		$params = $request->get_json_params();
 		$path = isset( $params['path'] ) ? ltrim( $params['path'], '/\\' ) : null;
-		
-		// Save step progress at the beginning of file retrieval
-		if ( empty( $path ) ) {
-			$this->core->save_progress( 'retrieveFiles' );
-		}
-		
+		$save = isset( $params['save'] ) ? $params['save'] : null;
+
+		$this->core->save_progress( 'retrieveFiles', array( 'targets' => $save['targets'] ?? [], 'processedDirs' => $save['processedDirs'] ?? [], 'totalDirs' => $save['totalDirs'] ?? 1, 'processedCount' => $save['processedCount'] ?? 0, 'directoriesToProcess' => $save['directoriesToProcess'] ?? [] ) );
+
+
 		$files = $this->engine->get_files( $path );
 		$files_count = count( $files );
 		$message = null;
@@ -357,11 +356,6 @@ class Meow_WPMC_Rest
 		}
 		else {
 			$message = sprintf( __( "Retrieved %d targets.", 'media-cleaner' ), $files_count );
-		}
-
-		// Save completion progress with targets for checkTargets step
-		if ( $files_count > 0 ) {
-			$this->core->save_progress( 'retrieveFiles_finished', array( 'targets' => $files ) );
 		}
 
 		$response = [ 

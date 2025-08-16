@@ -23,6 +23,9 @@ class Meow_WPMC_Support {
 		if ( class_exists( 'WPSEO_Options' ) ) 
       array_push( $natives, 'Yoast SEO' );
 
+    if ( class_exists( 'Meow_MGL_Core' ) )
+      array_push( $natives, 'Meow Gallery' );
+
     return $natives;
   }
         
