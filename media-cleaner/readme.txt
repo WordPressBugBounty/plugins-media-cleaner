@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 6.9.4
+Stable tag: 6.9.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,9 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 6.9.5 (2025/08/27) =
+* Add: A clear message guiding users on how to disable the pop-up.
 
 = 6.9.4 (2025/08/16) =
 * Fix: Added check for WP_Error in ACF after database calls to improve stability.
