@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 6.9.6
+Stable tag: 6.9.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -49,7 +49,7 @@ This plugin is compatible with all media types, including retina and WebP versio
 
 == Changelog ==
 
-= 6.9.6 (2025/09/29) =
+= 6.9.7 (2025/09/30) =
 * Add: Timeout mechanism to avoid a stalled scan.
 * Add: New Duplicates scan type (beta).
 * Update: Confirmation before restarting a scan to prevent accidental restarts.
