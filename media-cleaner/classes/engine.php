@@ -142,6 +142,66 @@ SQL;
 		return $finished;
 	}
 
+	function extractRefsFromThumbnails( $limit, $limitsize ) {
+		$medias = $this->get_media_entries( $limit, $limitsize, false );
+		require_once ABSPATH . 'wp-admin/includes/image.php';
+
+		foreach ( $medias as $media_id ) {			
+			$file = get_attached_file( $media_id );
+			$meta = wp_get_attachment_metadata( $media_id );
+
+			if ( ! is_array( $meta ) || ! isset( $meta['sizes'] ) ) {
+				$meta = array( 'sizes' => array() );
+			}
+
+			// Get the current registered image sizes
+			$needed_sizes = wp_get_registered_image_subsizes();
+			
+			foreach ( $needed_sizes as $size => $size_data ) {
+				$image_path = path_join( dirname( $file ), $meta['sizes'][ $size ]['file'] ?? '' );
+				$file_exists = isset( $meta['sizes'][ $size ] ) && file_exists( $image_path ) && filesize( $image_path ) > 0;
+				// Generate the thumbnail size.
+				$resized = null;
+				$origin = "{OG_THUMB}";
+				if( !$file_exists ) {
+					$resized = image_make_intermediate_size( $file, $size_data['width'], $size_data['height'], $size_data['crop'] ?? true );
+					$origin = "{GEN_THUMB}";
+				}
+
+				$image_path = $this->core->clean_url( $image_path );
+				// Add a reference for generated thumbnail
+				$this->core->add_reference_url(
+					$image_path,
+					$origin  . $size,
+					$media_id, ['force_cache' => true ]
+				);
+
+				if ( $resized ) {
+					$meta['sizes'][ $size ] = $resized;
+				}
+			}
+
+			wp_update_attachment_metadata( $media_id, $meta );
+		}
+
+		$this->core->write_references();
+		$this->core->save_progress( 'extractReferencesFromThumbnails', array(
+			'type' => 'thumbnails',
+			'limit' => $limit,
+			'limitSize' => $limitsize
+		) );
+
+		$finished = count( $medias ) < $limitsize;
+
+		if ( $finished )
+		{
+			$this->core->save_progress( 'extractReferencesFromThumbnails_finished' );
+			$this->core->log("Finished extracting refs from Thumbnails.");
+		}
+
+		return $finished;
+	}
+
 
 	// For each media, let's get a hash of the file and add it as a reference
 	function extractRefsFromDuplicates( $limit, $limitsize ) {
@@ -231,6 +291,7 @@ SQL;
 		// Get the hashes from the referenes ( unique ones ) 
 		global $wpdb;
 		$hashes = $wpdb->get_col( "SELECT DISTINCT originType FROM {$wpdb->prefix}mclean_refs" );
+
 		return $hashes;	
 	}
 

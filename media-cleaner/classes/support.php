@@ -53,7 +53,8 @@ class Meow_WPMC_Support {
     if ( class_exists( 'FLBuilderModel' ) )
       array_push( $unsupported, 'Beaver Builder' );
 
-    if ( class_exists( 'Oxygen_VSB_Dynamic_Shortcodes' ) )
+    $breakdance_mode_oxygen = defined( 'BREAKDANCE_MODE' ) && BREAKDANCE_MODE === 'oxygen';
+    if ( class_exists( 'Oxygen_VSB_Dynamic_Shortcodes' ) || $breakdance_mode_oxygen )
       array_push( $unsupported, 'Oxygen Builder' );
 
     if ( class_exists( 'Brizy_Editor_Post' ) )
@@ -121,7 +122,7 @@ class Meow_WPMC_Support {
 			array_push( $unsupported, 'Advanced Ads' );
     }
 
-    if ( function_exists( 'smart_slider_3_plugins_loaded' ) ) {
+    if ( defined( 'SMARTSLIDER3_LIBRARY_PATH' ) ) {
 			array_push( $unsupported, 'Smart Slider' );
     }
 
@@ -271,6 +272,11 @@ class Meow_WPMC_Support {
 		if ( defined( 'FLUENTFORM_VERSION' ) ) {
       array_push( $unsupported, 'Fluent Forms' );
     }
+
+    //Toolset
+		if ( defined( 'TYPES_VERSION' ) || defined( 'WPCF_VERSION' ) ) {
+			array_push( $unsupported, 'Toolset' );
+		}
 
     return $unsupported;
   }
