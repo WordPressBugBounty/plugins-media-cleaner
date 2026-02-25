@@ -1444,18 +1444,59 @@ class Meow_WPMC_Core {
 			// With files, we need both filename without resolution and filename with resolution, it's important
 			// to make sure the original file is not deleted if a size exists for it.
 			// With media, all URLs should be without resolution to make sure it matches Media.
-			if ( $this->current_method == 'files' ) {
-				$this->add_reference( null, $url, $type, $origin, $extra );
-				$this->add_reference( 0, $this->clean_url_from_resolution( $url ), $type, $origin, $extra );
-			}
-			else {
-				// 2021/11/08: I added this, the problem is that sometimes users create image filenames with the resolution
-				// in it, even though it is the original.
-				$this->add_reference( null, $url, $type, $origin, $extra );
+			$no_res_url = $this->clean_url_from_resolution( $url );
 
-				$this->add_reference( 0, $this->clean_url_from_resolution( $url ), $type, $origin, $extra );
+			$this->add_reference( null, $url, $type, $origin, $extra );
+			$this->add_reference( 0, $no_res_url, $type, $origin, $extra );
+
+			if ( $this->current_method == 'media' ) {
+				$id  = $this->get_id_from_clean_url( $no_res_url, false );
+				if( $id ) $this->add_reference_id( $id, $type, $origin, $extra );
 			}
+	
 		}
+	}
+
+	/**
+	 * Add an issue to the mclean_scan table.
+	 * 
+	 * @param string $path The path to the file (relative to uploads).
+	 * @param string $issue The issue code/type.
+	 * @param int|null $postId Optional post ID related to the issue.
+	 */
+	function add_issue( $path, $issue, $postId = null ) {
+		global $wpdb;
+		$table_name = $wpdb->prefix . "mclean_scan";
+		$clean_path = $this->clean_uploaded_filename( $path );
+		$filepath = trailingslashit( $this->upload_path ) . stripslashes( $path );
+		$filesize = file_exists( $filepath ) ? filesize( $filepath ) : 0;
+
+		// Check if this issue already exists
+		$existing = $wpdb->get_var( $wpdb->prepare( 
+			"SELECT id FROM $table_name WHERE path = %s AND issue = %s", 
+			$clean_path, $issue 
+		) );
+		
+		if ( $existing ) {
+			return; // Issue already exists
+		}
+
+		// Find potential parent
+		$potentialParentPath = $this->clean_url_from_resolution( $clean_path );
+		$parentId = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table_name WHERE path = %s", $potentialParentPath ) );
+		$parentId = $parentId ? (int)$parentId : null;
+
+		$wpdb->insert( $table_name,
+			array(
+				'time' => current_time('mysql'),
+				'type' => 0,
+				'postId' => $postId,
+				'path' => $clean_path,
+				'size' => $filesize,
+				'issue' => $issue,
+				'parentId' => $parentId
+			)
+		);
 	}
 
 	function add_reference_id( $idOrIds, $type, $origin = null, $extra = null ) {
@@ -1886,6 +1927,27 @@ class Meow_WPMC_Core {
 		return $sizes;
 	}
 
+	/**
+	 * Get all registered thumbnail sizes formatted for the UI.
+	 * Returns an array of sizes with name, shortname, width, and height.
+	 */
+	function get_thumbnail_sizes() {
+		$sizes = $this->get_image_sizes();
+		$result = array();
+		foreach ( $sizes as $name => $size ) {
+			// Generate a shortname (first 2 letters uppercase)
+			$shortname = strtoupper( substr( preg_replace( '/[^a-zA-Z]/', '', $name ), 0, 2 ) );
+			$result[] = array(
+				'name'      => $name,
+				'shortname' => $shortname,
+				'width'     => $size['width'] ? intval( $size['width'] ) : null,
+				'height'    => $size['height'] ? intval( $size['height'] ) : null,
+				'crop'      => $size['crop'],
+			);
+		}
+		return $result;
+	}
+
 	function clean_url_from_resolution( $url ) {
 		if ( !isset( $url ) ) return $url;
 
@@ -1902,6 +1964,65 @@ class Meow_WPMC_Core {
 				strtolower( substr( $url, 0, 4) ) == 'http' || $url[0] == '/'
 			)
 		);
+	}
+
+	function get_id_from_clean_url( $clean_url ) {
+		$found = false;
+		$id = 0;
+
+		if( !$found ) {
+			$id = $this->find_media_id_from_file( $clean_url, false );
+			if ( $id ) {
+				$is_attachment = get_post_type( $id ) === 'attachment';
+				if ( $is_attachment ) {
+					$found = true;
+				}
+			}
+		}
+
+		if( !$found ) {
+			$id = $this->custom_attachment_url_to_postid( $clean_url );
+			if ( $id ) {
+				$is_attachment = get_post_type( $id ) === 'attachment';
+				if ( $is_attachment ) {
+					$found = true;
+				}
+			}
+		}
+
+		if ( !$found ) {
+			$id = $this->resolve_from_database( $clean_url );
+			if ( $id ) {
+				$is_attachment = get_post_type( $id ) === 'attachment';
+				if ( $is_attachment ) {
+					$found = true;
+				}
+			}
+		}
+
+
+		return $found ? $id : null;
+	}
+
+	function resolve_from_database( $url ) {
+		global $wpdb;
+		$pattern = '/[_-]\d+x\d+(?=\.[a-z]{3,4}$)/';
+		$url = preg_replace( $pattern, '', $url );
+		$url = $this->get_pathinfo_from_image_src( $url );
+		$query = $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE guid LIKE '%s'", '%' . $url . '%' );
+		$attachment = $wpdb->get_col( $query );
+		return empty( $attachment ) ? null : $attachment[0];
+	}
+
+	function get_pathinfo_from_image_src( $image_src ) {
+		$uploads = wp_upload_dir();
+		$uploads_url = trailingslashit( $uploads['baseurl'] );
+		if ( strpos( $image_src, $uploads_url ) === 0 )
+			return ltrim( substr( $image_src, strlen( $uploads_url ) ), '/');
+		else if ( strpos( $image_src, wp_make_link_relative( $uploads_url ) ) === 0 )
+			return ltrim( substr( $image_src, strlen( wp_make_link_relative( $uploads_url ) ) ), '/');
+		$img_info = parse_url( $image_src );
+		return ltrim( $img_info['path'], '/' );
 	}
 
 	function clean_url_from_resolution_ref( &$url ) {
@@ -2233,8 +2354,8 @@ class Meow_WPMC_Core {
 		return array(
 			'method' => 'media',
 			'content' => true,
-			'filesystem_content' => false,
-			'media_library' => true,
+			'filesystem_content' => true,
+			'media_library' => false,
 			'live_content' => false,
 			'debuglogs' => false,
 			'images_only' => false,
@@ -2259,6 +2380,7 @@ class Meow_WPMC_Core {
 			'repair_mode' => false,
 			'expert_mode' => false,
 			'logs_path' => null,
+			'thumbnail_force_issues' => [],
 		);
 	}
 
@@ -2318,6 +2440,7 @@ class Meow_WPMC_Core {
 		// Dynamically added options
 		//TODO: we should have a rest route to fetch this instead of using the options directly. This is temporary.
 		$options['scan_progress'] = get_transient( $this->progress_key );
+		$options['thumbnail_sizes'] = $this->get_thumbnail_sizes();
 
 		return $options;
 	}

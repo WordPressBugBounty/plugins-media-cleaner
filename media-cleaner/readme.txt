@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 7.0.3
+Stable tag: 7.0.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,16 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.0.4 (2026/02/25) =
+* Fix: Improve how issue names are displayed.
+* Add: Allow selecting specific thumbnail sizes (to avoid the unnecessary ones).
+* Fix: Ensure media scans always use ID-based URL references (improving compatibility with WPML).
+* Update: Improve compatibility with multisite and network site.
+* Update: Apply better default settings on fresh installs.
+* 🎵 Discuss with others about Media Cleaner on [the Discord](https://discord.gg/bHDGh38).
+* 🌴 Keep us motivated with [a little review here](https://wordpress.org/support/plugin/media-cleaner/reviews/). Thank you!
+* 🥰 If you want to help us, check our [Patreon](https://www.patreon.com/meowapps). Thank you!
 
 = 7.0.3 (2026/01/27) =
 * Add: Added full support for newer versions of the Oxygen builder.

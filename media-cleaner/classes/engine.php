@@ -146,6 +146,12 @@ SQL;
 		$medias = $this->get_media_entries( $limit, $limitsize, false );
 		require_once ABSPATH . 'wp-admin/includes/image.php';
 
+		// Get the sizes that should be marked as issues
+		$force_issue_sizes = $this->core->get_option( 'thumbnail_force_issues' );
+		if ( !is_array( $force_issue_sizes ) ) {
+			$force_issue_sizes = [];
+		}
+
 		foreach ( $medias as $media_id ) {			
 			$file = get_attached_file( $media_id );
 			$meta = wp_get_attachment_metadata( $media_id );
@@ -169,12 +175,19 @@ SQL;
 				}
 
 				$image_path = $this->core->clean_url( $image_path );
-				// Add a reference for generated thumbnail
-				$this->core->add_reference_url(
-					$image_path,
-					$origin  . $size,
-					$media_id, ['force_cache' => true ]
-				);
+
+				// Check if this size should be marked as an issue instead of a reference
+				if ( in_array( $size, $force_issue_sizes ) ) {
+					// Mark as issue instead of reference
+					$this->core->add_issue( $image_path, 'FORCED_THUMBNAIL_ISSUE', $media_id );
+				} else {
+					// Add a reference for generated thumbnail
+					$this->core->add_reference_url(
+						$image_path,
+						$origin  . $size,
+						$media_id, ['force_cache' => true ]
+					);
+				}
 
 				if ( $resized ) {
 					$meta['sizes'][ $size ] = $resized;
