@@ -73,13 +73,6 @@ class Meow_WPMC_Core {
 			$is_wpmc_rest = strpos( $request_uri, '/media-cleaner/v1' ) !== false;
 		}
 
-		$shouldLoad = ( defined( 'WP_CLI' ) && WP_CLI ) || $is_wpmc_screen || $is_wpmc_rest;
-
-		if ( ! $shouldLoad ) {
-			return;
-		}
-
-
 		// Variables
 		$this->site_url = get_site_url();
 		$this->multilingual = $this->is_multilingual();
@@ -92,13 +85,19 @@ class Meow_WPMC_Core {
 		$this->upload_url = substr( $uploaddir['baseurl'], strlen( $this->site_url ) );
 		$this->check_content = $this->get_option( 'content' );
 		$this->debug_logs = $this->get_option( 'debuglogs' );
-		$this->is_rest = MeowKit_WPMC_Helpers::is_rest();
+		$this->is_rest = $is_wpmc_rest;
 		$this->is_cli = defined( 'WP_CLI' ) && WP_CLI;
 		$this->shortcode_analysis = !$this->get_option( 'shortcodes_disabled' );
 		$this->use_cached_references = $this->get_option( 'use_cached_references' );
 		
 		global $wpmc;
 		$wpmc = $this;
+
+		$shouldLoad = ( defined( 'WP_CLI' ) && WP_CLI ) || $is_wpmc_screen || $is_wpmc_rest;
+
+		if ( ! $shouldLoad ) {
+			return;
+		}
 
 		// Language
 		load_plugin_textdomain( WPMC_DOMAIN, false, basename( WPMC_PATH ) . '/languages' );
@@ -482,6 +481,10 @@ class Meow_WPMC_Core {
 	// SImply use regex to get URLs from a string return an array of URLs
 	function get_urls_from_string( $string ) {
 		$urls = array();
+		// Replace the satinized urls with the real ones to be sure to get them in the regex
+		$string = str_replace( '\\', '', $string );
+
+
 		$pattern = '/(https?:\/\/[^\s\"\'\>\<\?\#]+\.(' . $this->types . '))/i';
 		if ( preg_match_all( $pattern, $string, $matches ) ) {
 			foreach ( $matches[0] as $match ) {
@@ -1563,6 +1566,7 @@ class Meow_WPMC_Core {
 				'mediaId' => $mediaId,
 				'mediaUrl' => $ref->mediaUrl,
 				'originType' => $ref->originType,
+				'origin' => $ref->origin,
 				'parentId' => empty( $ref->parentId ) ? null : (int)$ref->parentId,
 			] );
 		}
@@ -1581,10 +1585,6 @@ class Meow_WPMC_Core {
 
 		if ( $force_cache ) {
 			$this->use_cached_references = true;
-		}
-
-		if ( !empty( $origin ) ) {
-			$type = $type . " [$origin]";
 		}
 
 		if ( !empty( $id ) ) {
@@ -1699,13 +1699,14 @@ class Meow_WPMC_Core {
 		$table = $wpdb->prefix . "mclean_refs";
 		$values = array();
 		$place_holders = array();
-		$query = "INSERT INTO $table (mediaId, mediaUrl, originType, parentId) VALUES ";
+		$query = "INSERT INTO $table (mediaId, mediaUrl, originType, origin, parentId) VALUES ";
 
 		foreach ( $entries as $value ) {
+			$origin = isset( $value['origin'] ) ? $value['origin'] : null;
 			if ( !is_null($value['id'] ) ) {
 				// Media Reference
-				array_push( $values, $value['id'], $value['type'] );
-				$place_holders[] = "('%d', NULL, '%s', NULL)";
+				array_push( $values, $value['id'], $value['type'], $origin );
+				$place_holders[] = "('%d', NULL, '%s', '%s', NULL)";
 
 				if ($this->debug_logs) {
 					$this->log("＋ Media #{$value['id']} (as ID)");
@@ -1713,15 +1714,15 @@ class Meow_WPMC_Core {
 			}
 			else if ( !is_null($value['url'] ) ) {
 				// File Reference
-				array_push( $values, $value['url'], $value['type'] );
+				array_push( $values, $value['url'], $value['type'], $origin );
 				if ( isset( $value['parentId'] ) ) {
 					array_push( $values, $value['parentId'] );
-					$place_holders[] = "(NULL, '%s', '%s', '%d')";
+					$place_holders[] = "(NULL, '%s', '%s', '%s', '%d')";
 					if ( $this->debug_logs ) {
 						$this->log( "＋ {$value['url']} (as URL) (ParentID: {$value['parentId']})" );
 					}
 				} else {
-					$place_holders[] = "(NULL, '%s', '%s', NULL)";
+					$place_holders[] = "(NULL, '%s', '%s', '%s', NULL)";
 					if ( $this->debug_logs ) {
 						$this->log("＋ {$value['url']} (as URL)");
 					}
@@ -1848,9 +1849,10 @@ class Meow_WPMC_Core {
 
 		return $sizes_as_key ? $urls : array_values( $urls );
 	}
+	
+	function get_thumbnails_urls_from_srcset( $media, $size = 'full'  ) {
 
-
-	function get_thumbnails_urls_from_srcset( $id, $size = 'full'  ) {
+		$id = is_numeric( $media ) ? (int)$media : $this->get_id_from_clean_url( $media, false );
 
 		$image_size = $this->get_attachment_size_by_id( $id, $size );
 
@@ -2519,6 +2521,7 @@ function wpmc_create_database() {
 		mediaId BIGINT(20) NULL,
 		mediaUrl TINYTEXT NULL,
 		originType TINYTEXT NOT NULL,
+		origin TINYTEXT NULL,
 		parentId BIGINT(20) NULL,
 		PRIMARY KEY  (id),
 		KEY mediaId_index (mediaId)

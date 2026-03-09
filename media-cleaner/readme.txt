@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 7.0.4
+Stable tag: 7.0.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.0.5 (2026/03/09) =
+* Fix: Ensure plugin checks run after all required options are initialized.
+* Add: Introduce LayerSlider compatibility and update Enfold theme integration.
+* Update: Improve origin handling so the plugin can work with sources that don't use numeric IDs.
+* Add: Include more direct documentation links in error popups.
+* Add: Provide ACF-specific filters for URLs and IDs to give developers more precise control over field handling.
 
 = 7.0.4 (2026/02/25) =
 * Fix: Improve how issue names are displayed.

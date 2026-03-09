@@ -278,6 +278,11 @@ class Meow_WPMC_Support {
 			array_push( $unsupported, 'Toolset' );
 		}
 
+    //LayerSlider
+    if ( defined( 'LS_PLUGIN_VERSION' ) ) {
+      array_push( $unsupported, 'LayerSlider' );
+    }
+
     return $unsupported;
   }
 }

@@ -724,15 +724,11 @@ class Meow_WPMC_Rest
 	
 		// Extract post IDs and media IDs/URLs
 		foreach ( $entries as $entry ) {
-			// Extract post ID from originType
-			if ( preg_match('/\[(\d+)\]/', $entry->originType, $matches) ) {
-				$post_id = intval( $matches[1] );
-				$entry->post_id = $post_id;
-				$post_ids[] = $post_id;
-			} else {
-				$entry->post_id = null;
+
+			if( $entry->origin && is_numeric( $entry->origin ) ) {
+				$post_ids[] = (int) $entry->origin;
 			}
-	
+
 			// Collect media IDs and URLs
 			if ( $entry->mediaId ) {
 				$media_ids[] = $entry->mediaId;
@@ -790,11 +786,12 @@ class Meow_WPMC_Rest
 		// Assign post titles and thumbnails to entries
 		foreach ( $entries as $entry ) {
 			// Assign post title
-			if ( isset( $entry->post_id ) && isset( $post_titles[ $entry->post_id ] ) ) {
-				$entry->post_title = $post_titles[ $entry->post_id ];
+			if ( isset( $entry->origin ) && isset( $post_titles[ $entry->origin ] ) ) {
+				$entry->post_title = $post_titles[ $entry->origin ];
 			} else {
 				$entry->post_title = '';
 			}
+		
 	
 			// Assign thumbnail
 			$entry->thumbnail = '';
