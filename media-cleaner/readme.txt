@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 7.0.5
+Stable tag: 7.0.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,9 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.0.6 (2026/03/27) =
+* Fix: Hotfix to resolve a security issue that could allow SSRF attacks through embedded iframes.
 
 = 7.0.5 (2026/03/09) =
 * Fix: Ensure plugin checks run after all required options are initialized.

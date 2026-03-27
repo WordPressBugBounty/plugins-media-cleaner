@@ -564,8 +564,11 @@ class Meow_WPMC_Core {
 		$iframes = $dom->getElementsByTagName( 'iframe' );
 		foreach( $iframes as $iframe ) {
 			$iframe_src = $iframe->getAttribute( 'src' );
-			// Ignore if the iframe src is not on this server
-			if ( ( strpos( $iframe_src, $this->servername ) !== false) || ( substr( $iframe_src, 0, 1 ) == "/" ) ) {
+			// Only process iframes that are local to this server (strict host match to prevent SSRF)
+			$parsed_url = wp_parse_url( $iframe_src );
+			$is_relative = ( substr( $iframe_src, 0, 1 ) === '/' && substr( $iframe_src, 0, 2 ) !== '//' );
+			$is_local = ( isset( $parsed_url['host'] ) && $parsed_url['host'] === $this->servername );
+			if ( $is_relative || $is_local ) {
 				// Create a new DOM Document to hold iframe
 				$iframe_doc = new DOMDocument();
 				// Load the url's contents into the DOM
