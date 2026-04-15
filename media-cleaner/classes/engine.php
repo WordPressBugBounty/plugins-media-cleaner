@@ -49,7 +49,6 @@ SQL;
 		if ( empty( $limit ) ) {
 			$this->core->reset_issues();
 			$this->core->reset_references();
-			$this->core->reset_cached_references();
 			$this->core->reset_progress(  );
 		}
 
@@ -103,8 +102,19 @@ SQL;
 
 		$this->core->timeout_check_start( count( $posts ) );
 
+		$is_debug = $this->core->is_debug();
+
 		foreach ( $posts as $post ) {
 			$this->core->timeout_check();
+
+			// Debug logging for timeout detection
+			if ( $is_debug ) {
+				$post_obj = get_post( $post );
+				$post_type = $post_obj ? $post_obj->post_type : 'unknown';
+				$post_title = $post_obj ? substr( $post_obj->post_title, 0, 50 ) : 'no title';
+				$start_time = microtime( true );
+				$this->core->log( "🔍 Processing post ID: $post | Type: $post_type | Title: $post_title" );
+			}
 
 			// Check content
 			if ( $check_content ) {
@@ -115,6 +125,11 @@ SQL;
 
 			// Extra scanning methods
 			// do_action( 'wpmc_scan_extra', $post );
+
+			if ( $is_debug ) {
+				$elapsed_ms = round( ( microtime( true ) - $start_time ) * 1000, 2 );
+				$this->core->log( "✓ Completed post ID: $post in {$elapsed_ms}ms" );
+			}
 
 			$this->core->timeout_check_additem();
 		}

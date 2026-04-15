@@ -21,13 +21,7 @@ class Meow_WPMC_Core {
 	private $regex_file = '/[A-Za-z0-9-_,.\(\)\s]+[.]{1}(MIMETYPES)/';
 
 	private $refcache = array();
-	private $use_cached_references = false;
 	private $progress_key = 'wpmc_progress';
-	private $cached_ids_key = 'wpmc_cached_ids';
-	private $cached_urls_key = 'wpmc_cached_urls';
-
-	private $cached_ids_cli  = array();
-	private $cached_urls_cli = array();
 
 	private $check_content = null;
 	private $debug_logs = null;
@@ -37,6 +31,10 @@ class Meow_WPMC_Core {
 
 	public function get_shortcode_analysis() {
 		return $this->shortcode_analysis;
+	}
+
+	public function is_debug() {
+		return $this->debug_logs;
 	}
 
 	public function __construct() {
@@ -88,7 +86,6 @@ class Meow_WPMC_Core {
 		$this->is_rest = $is_wpmc_rest;
 		$this->is_cli = defined( 'WP_CLI' ) && WP_CLI;
 		$this->shortcode_analysis = !$this->get_option( 'shortcodes_disabled' );
-		$this->use_cached_references = $this->get_option( 'use_cached_references' );
 		
 		global $wpmc;
 		$wpmc = $this;
@@ -516,6 +513,15 @@ class Meow_WPMC_Core {
 				$html
 			);
 		}
+
+		// Remove any base64 src from the HTML to prevent regex from getting stuck and crashing the site
+		// Handles both proper (data:image/...) and malformed (image/jpeg;base64,...) base64
+		// Also handles HTML-encoded quotes (&quot;) and multiline base64
+		$html = preg_replace( '/src=["\'](?:data:)?(?:image|video|audio)\/[^"\']+;base64,[^"\']*["\']/', '', $html );
+		$html = preg_replace( '/src=&quot;(?:data:)?(?:image|video|audio)\/[^&]+;base64,[^&]*&quot;/', '', $html );
+		// Catch any remaining base64 data that might cause regex issues (greedy catch-all)
+		$html = preg_replace( '/;base64,[a-zA-Z0-9+\/=\s]{1000,}/', '', $html );
+
 
 		// Resolve src-set and shortcodes
 		if ( $this->get_shortcode_analysis() ) {
@@ -1455,11 +1461,12 @@ class Meow_WPMC_Core {
 			$this->add_reference( null, $url, $type, $origin, $extra );
 			$this->add_reference( 0, $no_res_url, $type, $origin, $extra );
 
-			if ( $this->current_method == 'media' ) {
-				$id  = $this->get_id_from_clean_url( $no_res_url, false );
-				if( $id ) $this->add_reference_id( $id, $type, $origin, $extra );
+			if ( $this->multilingual ) {
+				if ( $this->current_method == 'media' ) {
+					$id  = $this->get_id_from_clean_url( $no_res_url, false );
+					if( $id ) $this->add_reference_id( $id, $type, $origin, $extra );
+				}
 			}
-	
 		}
 	}
 
@@ -1577,35 +1584,10 @@ class Meow_WPMC_Core {
 	}
 
 	// The references are actually not being added directly in the DB, they are being pushed
-	// into a cache ($this->refcache).
+	// into a cache ($this->refcache), then written to the database via write_references().
 	private function add_reference( $id, $url, $type, $origin = null, $extra = null ) {
-
-		$force_no_cache = $extra && isset( $extra['force_no_cache'] ) ? $extra['force_no_cache'] : false;
-		$force_cache = $extra && isset( $extra['force_cache'] ) ? $extra['force_cache'] : false;
-		if ( $force_no_cache ) {
-			$this->use_cached_references = false;
-		}
-
-		if ( $force_cache ) {
-			$this->use_cached_references = true;
-		}
-
 		if ( !empty( $id ) ) {
-
-			if( $this->use_cached_references ) {
-
-				$added = $this->add_cached_id( $id );
-				if ( $added ) {
-					array_push( $this->refcache, array( 'id' => $id, 'url' => null, 'type' => $type, 'origin' => $origin ) );
-				}
-				
-				
-			}
-
-			if( !$this->use_cached_references ) {
-				array_push( $this->refcache, array( 'id' => $id, 'url' => null, 'type' => $type, 'origin' => $origin ) );
-			}
-			
+			array_push( $this->refcache, array( 'id' => $id, 'url' => null, 'type' => $type, 'origin' => $origin ) );
 		}
 		if ( !empty( $url ) ) {
 			// The URL shouldn't contain http, https, javascript at the beginning (and there are probably many more cases)
@@ -1613,131 +1595,83 @@ class Meow_WPMC_Core {
 			if ( substr( $url, 0, 5 ) === "http:" || substr( $url, 0, 6 ) === "https:" || substr( $url, 0, 11 ) === "javascript:" ) {
 				return;
 			}
-
-			if( $this->use_cached_references ) {
-
-				$added = $this->add_cached_url( $url );
-				if ( $added ) {
-					array_push( $this->refcache, array( 'id' => null, 'url' => $url, 'type' => $type, 'origin' => $origin ) );
-				}
-
-			}
-
-			if( !$this->use_cached_references ) {
-				array_push( $this->refcache, array( 'id' => null, 'url' => $url, 'type' => $type, 'origin' => $origin ) );
-			}
-
+			array_push( $this->refcache, array( 'id' => null, 'url' => $url, 'type' => $type, 'origin' => $origin ) );
 		}
-
-	}
-
-	private function get_cached_ids() {
-		global $wpdb;
-		$table_name = $wpdb->prefix . "mclean_cache";
-		$cached_ids = $wpdb->get_col( $wpdb->prepare(
-			"SELECT cache_value FROM $table_name WHERE cache_key = %s AND cache_type = %s",
-			$this->cached_ids_key,
-			'id'
-		) );
-		return $cached_ids ? $cached_ids : array();
-	}
-
-	private function get_cached_urls() {
-		global $wpdb;
-		$table_name = $wpdb->prefix . "mclean_cache";
-		$cached_urls = $wpdb->get_col( $wpdb->prepare(
-			"SELECT cache_value FROM $table_name WHERE cache_key = %s AND cache_type = %s",
-			$this->cached_urls_key,
-			'url'
-		) );
-		return $cached_urls ? $cached_urls : array();
-	}
-
-	private function add_cached_id($id) {
-		global $wpdb;
-		$table_name = $wpdb->prefix . "mclean_cache";
-		
-		// Try to insert, ignore if duplicate (UNIQUE KEY will prevent duplicates)
-		$result = $wpdb->query( $wpdb->prepare(
-			"INSERT IGNORE INTO $table_name (cache_key, cache_value, cache_type) VALUES (%s, %s, %s)",
-			$this->cached_ids_key,
-			$id,
-			'id'
-		) );
-		
-		// Return true if a row was inserted
-		return $result > 0;
-	}
-
-	private function add_cached_url($url) {
-		global $wpdb;
-		$table_name = $wpdb->prefix . "mclean_cache";
-		
-		// Try to insert, ignore if duplicate (UNIQUE KEY will prevent duplicates)
-		$result = $wpdb->query( $wpdb->prepare(
-			"INSERT IGNORE INTO $table_name (cache_key, cache_value, cache_type) VALUES (%s, %s, %s)",
-			$this->cached_urls_key,
-			$url,
-			'url'
-		) );
-		
-		// Return true if a row was inserted
-		return $result > 0;
-	}
-
-	function reset_cached_references() {
-		global $wpdb;
-		$table_name = $wpdb->prefix . "mclean_cache";
-		
-		// Delete all cached references from the cache table
-		$wpdb->query( "TRUNCATE TABLE $table_name" );
-		
-		$this->cached_ids_cli = array();
-		$this->cached_urls_cli = array();
 	}
 
 	function insert_references($entries)
 	{
 		global $wpdb;
 		$table = $wpdb->prefix . "mclean_refs";
+
+		$refs_buffer = $this->get_option( 'refs_buffer' );
+		if ( empty( $refs_buffer ) || $refs_buffer < 1 ) {
+			$refs_buffer = 500;
+		}
+
 		$values = array();
 		$place_holders = array();
-		$query = "INSERT INTO $table (mediaId, mediaUrl, originType, origin, parentId) VALUES ";
+		$entry_count = 0;
 
 		foreach ( $entries as $value ) {
 			$origin = isset( $value['origin'] ) ? $value['origin'] : null;
 			if ( !is_null($value['id'] ) ) {
 				// Media Reference
-				array_push( $values, $value['id'], $value['type'], $origin );
-				$place_holders[] = "('%d', NULL, '%s', '%s', NULL)";
+				$hash = md5( $value['id'] . '|' . $value['type'] . '|' . $origin );
+				array_push( $values, $value['id'], $value['type'], $origin, $hash );
+				$place_holders[] = "('%d', NULL, '%s', '%s', NULL, '%s')";
 
 				if ($this->debug_logs) {
 					$this->log("＋ Media #{$value['id']} (as ID)");
 				}
+				$entry_count++;
 			}
 			else if ( !is_null($value['url'] ) ) {
 				// File Reference
-				array_push( $values, $value['url'], $value['type'], $origin );
+				$parentId = isset( $value['parentId'] ) ? $value['parentId'] : null;
+				$hash = md5( '|' . $value['url'] . '|' . $value['type'] . '|' . $origin . '|' . $parentId );
+				array_push( $values, $value['url'], $value['type'], $origin, $hash );
 				if ( isset( $value['parentId'] ) ) {
 					array_push( $values, $value['parentId'] );
-					$place_holders[] = "(NULL, '%s', '%s', '%s', '%d')";
+					$place_holders[] = "(NULL, '%s', '%s', '%s', '%d', '%s')";
 					if ( $this->debug_logs ) {
 						$this->log( "＋ {$value['url']} (as URL) (ParentID: {$value['parentId']})" );
 					}
 				} else {
-					$place_holders[] = "(NULL, '%s', '%s', '%s', NULL)";
+					$place_holders[] = "(NULL, '%s', '%s', '%s', NULL, '%s')";
 					if ( $this->debug_logs ) {
 						$this->log("＋ {$value['url']} (as URL)");
 					}
 				}
+				$entry_count++;
+			}
+
+			// Flush to DB when buffer is full
+			if ( $entry_count >= $refs_buffer ) {
+				$this->log( "Flushing $entry_count references to the database..." );
+				$this->flush_references_to_db( $table, $values, $place_holders );
+				$values = array();
+				$place_holders = array();
+				$entry_count = 0;
 			}
 		}
 
+		// Flush remaining entries
 		if ( !empty( $values ) ) {
-			$query .= implode( ', ', $place_holders );
-			$prepared = $wpdb->prepare( "$query ", $values );
-			$wpdb->query( $prepared );
+			$this->log( "Flushing remaining $entry_count references to the database..." );
+			$this->flush_references_to_db( $table, $values, $place_holders );
 		}
+	}
+
+	function flush_references_to_db( $table, $values, $place_holders ) {
+		global $wpdb;
+		if ( empty( $values ) ) {
+			return;
+		}
+		$query = "INSERT IGNORE INTO $table (mediaId, mediaUrl, originType, origin, parentId, ref_hash) VALUES ";
+		$query .= implode( ', ', $place_holders );
+		$prepared = $wpdb->prepare( "$query ", $values );
+		$wpdb->query( $prepared );
 	}
 
 	function reset_progress() {
@@ -2283,7 +2217,6 @@ class Meow_WPMC_Core {
 		global $wpdb;
 		$table_name = $wpdb->prefix . "mclean_refs";
 		$wpdb->query("TRUNCATE $table_name");
-		$this->reset_cached_references();
 	}
 
 	function get_issue_for_postId( $postId ) {
@@ -2376,8 +2309,9 @@ class Meow_WPMC_Core {
 			'analysis_buffer' => 100,
 			'file_op_buffer' => 20,
 			'delay' => 100,
+			'refs_buffer' => 500,
 			'shortcodes_disabled' => false,
-			'use_cached_references' => true,
+
 			'output_buffer_cleaning_disabled' => false,
 			'php_error_logs' => false,
 			'posts_per_page' => 10,
@@ -2479,6 +2413,11 @@ class Meow_WPMC_Core {
 			$options['delay'] = 100;
 			$hasChanges = true;
 		}
+		$refs = $options['refs_buffer'];
+		if ( $refs === '' ) {
+			$options['refs_buffer'] = 500;
+			$hasChanges = true;
+		}
 		if ( $hasChanges ) {
 			update_option( $this->option_name, $options, false );
 		}
@@ -2526,22 +2465,12 @@ function wpmc_create_database() {
 		originType TINYTEXT NOT NULL,
 		origin TINYTEXT NULL,
 		parentId BIGINT(20) NULL,
+		ref_hash VARCHAR(32) NULL,
 		PRIMARY KEY  (id),
-		KEY mediaId_index (mediaId)
+		KEY mediaId_index (mediaId),
+		UNIQUE KEY ref_hash_unique (ref_hash)
 	) " . $charset_collate . ";";
 	require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
-	dbDelta( $sql );
-	
-	// Create cache table for cached IDs and URLs
-	$table_name = $wpdb->prefix . "mclean_cache";
-	$sql = "CREATE TABLE $table_name (
-		id BIGINT(20) NOT NULL AUTO_INCREMENT,
-		cache_key VARCHAR(50) NOT NULL,
-		cache_value VARCHAR(255) NOT NULL,
-		cache_type VARCHAR(20) NOT NULL,
-		PRIMARY KEY  (id),
-		UNIQUE KEY cache_lookup (cache_key, cache_value, cache_type)
-	) " . $charset_collate . ";";
 	dbDelta( $sql );
 }
 
@@ -2550,8 +2479,7 @@ function wpmc_remove_database() {
 	$table_name1 = $wpdb->prefix . "mclean_scan";
 	$table_name2 = $wpdb->prefix . "mclean_refs";
 	$table_name3 = $wpdb->prefix . "wpmcleaner";
-	$table_name4 = $wpdb->prefix . "mclean_cache";
-	$sql = "DROP TABLE IF EXISTS $table_name1, $table_name2, $table_name3, $table_name4;";
+	$sql = "DROP TABLE IF EXISTS $table_name1, $table_name2, $table_name3;";
 	$wpdb->query( $sql );
 }
 

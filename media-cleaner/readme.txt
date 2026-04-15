@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 7.0.6
+Stable tag: 7.0.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.0.7 (2026/04/15) =
+* Add: New "References Buffer" option to split and flush reference processing to reduce memory errors on large datasets.
+* Fix: Improved base64 handling to better cope with malformed edge cases and prevent related issues.
+* Add: More detailed timeout debugging for reference extraction to make diagnosing performance issues easier.
+* Fix: Removed base64 content from HTML before URL parsing to prevent regex timeouts on complex pages.
+* Update: Replaced cached references with a unique hash-based system and limited media ID lookups to multilingual URLs for faster and cleaner reference handling.
 
 = 7.0.6 (2026/03/27) =
 * Fix: Hotfix to resolve a security issue that could allow SSRF attacks through embedded iframes.
