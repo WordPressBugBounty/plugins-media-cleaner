@@ -4,8 +4,8 @@ if ( !class_exists( 'MeowKit_WPMC_Admin' ) ) {
 
   class MeowKit_WPMC_Admin {
     public static $loaded = false;
-    public static $version = '4.0';
-    public static $admin_version = '4.0';
+    public static $version = '5.0';
+    public static $admin_version = '5.0';
     public static $network_license_modal_added = false;
     public static $network_license_plugins = [];
 
@@ -157,6 +157,11 @@ if ( !class_exists( 'MeowKit_WPMC_Admin' ) ) {
         if ( $page === 'meowapps-main-menu' ) {
           add_filter( 'admin_footer_text', [ $this, 'admin_footer_text' ], 100000, 1 );
         }
+
+        // Promote AI Engine on the WordPress 7 Connectors page when AI Engine
+        // itself isn't installed. When AI Engine is active, its own banner
+        // takes over — so this path only runs on "bare" Meow Apps installs.
+        add_action( 'admin_footer', [ $this, 'maybe_render_wpai_promo' ] );
 
         MeowKit_WPMC_Admin::$loaded = true;
       }
@@ -504,6 +509,194 @@ if ( !class_exists( 'MeowKit_WPMC_Admin' ) ) {
         MeowKit_WPMC_Admin::$version,
         __FILE__
       );
+    }
+
+    /**
+     * Renders a promo banner on WordPress 7's Connectors page when AI Engine
+     * isn't installed. Kept self-contained so the common library stays simple:
+     * no new file, no REST endpoint, dismissal persists in localStorage.
+     */
+    public function maybe_render_wpai_promo() {
+      // WordPress 7+ only.
+      if ( ! class_exists( 'WP_Connector_Registry' ) ) {
+        return;
+      }
+      // If AI Engine is installed, its own Connectors banner takes over.
+      if ( class_exists( 'Meow_MWAI_Core' ) ) {
+        return;
+      }
+      // Another Meow Apps plugin's common copy may have rendered already.
+      if ( defined( 'MEOWAPPS_WPAI_PROMO_RENDERED' ) ) {
+        return;
+      }
+      // Gate on the Connectors screen. The hook suffix differs between the
+      // direct file (`options-connectors.php`) and the menu-page variant.
+      $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+      $id = $screen ? $screen->id : ( isset( $GLOBALS['hook_suffix'] ) ? $GLOBALS['hook_suffix'] : '' );
+      $targets = array( 'options-connectors', 'options-connectors.php', 'settings_page_options-connectors-wp-admin' );
+      if ( ! in_array( $id, $targets, true ) ) {
+        return;
+      }
+      define( 'MEOWAPPS_WPAI_PROMO_RENDERED', true );
+
+      // Install button → WordPress's own plugin-install search page, pre-
+      // filtered for AI Engine. One click from there to install. This is the
+      // most reliable path: no custom nonces, native progress UI, native
+      // filesystem credential prompt if needed.
+      $can_install = current_user_can( 'install_plugins' );
+      $install_url = $can_install
+        ? self_admin_url( 'plugin-install.php?tab=search&type=term&s=AI+Engine' )
+        : 'https://wordpress.org/plugins/ai-engine/';
+      $wporg_url   = 'https://wordpress.org/plugins/ai-engine/';
+      $learn_url   = 'https://meowapps.com/wordpress-7-ai-engine-gateway/';
+
+      // Title is split so "AI Engine" can carry an anchor to wp.org. Keeping
+      // the pieces as data (not one HTML string) avoids escaping surprises and
+      // keeps the translation unit stable.
+      $payload = array(
+        'titleBefore' => __( 'Highly recommended: Let ', 'meowapps' ),
+        'titleLink'   => __( 'AI Engine', 'meowapps' ),
+        'titleAfter'  => __( ' handle your connections.', 'meowapps' ),
+        'sub'         => __( 'One plugin for every provider. Keep your AI setup clean and consistent: monitor your API costs in one place, log every single request, and avoid the mess of juggling separate plugins for each AI model.', 'meowapps' ),
+        'install'     => __( 'Install AI Engine', 'meowapps' ),
+        'learn'       => __( 'Learn more', 'meowapps' ),
+        'dismiss'     => __( 'Dismiss', 'meowapps' ),
+        'installUrl'  => $install_url,
+        'wporgUrl'    => $wporg_url,
+        'learnUrl'    => $learn_url,
+      );
+      ?>
+      <style>
+        .meowapps-wpai-promo {
+          margin: 0 0 16px; padding: 14px 18px;
+          display: flex; align-items: flex-start; gap: 14px;
+          background: #f0f4ff; border: 1px solid #d6deff; border-radius: 4px;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          font-size: 13px; line-height: 1.45; color: #1e1e1e;
+        }
+        .meowapps-wpai-promo-icon {
+          width: 32px; height: 32px; border-radius: 50%;
+          background: #2f5fff; color: #fff;
+          display: flex; align-items: center; justify-content: center;
+          flex-shrink: 0;
+          margin-top: 1px;
+        }
+        .meowapps-wpai-promo-icon svg { width: 18px; height: 18px; display: block; }
+        .meowapps-wpai-promo-body {
+          flex: 1; min-width: 0;
+          display: flex; flex-direction: column; gap: 10px;
+        }
+        .meowapps-wpai-promo-text strong { font-weight: 700; display: block; margin-bottom: 3px; }
+        .meowapps-wpai-promo-text span { color: #50575e; }
+        .meowapps-wpai-promo-titlelink {
+          color: #2f5fff; text-decoration: none; border-bottom: 1px dashed #2f5fff;
+        }
+        .meowapps-wpai-promo-titlelink:hover { color: #2448cc; border-bottom-color: #2448cc; }
+        .meowapps-wpai-promo-actions {
+          display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+        }
+        .meowapps-wpai-promo-btn {
+          appearance: none; border: 1px solid transparent; border-radius: 4px;
+          padding: 7px 16px; font: inherit; font-size: 12.5px; font-weight: 600;
+          cursor: pointer; text-decoration: none;
+          transition: background 0.12s ease, border-color 0.12s ease;
+        }
+        .meowapps-wpai-promo-btn-primary { background: #2f5fff; color: #fff; }
+        .meowapps-wpai-promo-btn-primary:hover { background: #2448cc; color: #fff; }
+        .meowapps-wpai-promo-btn-secondary { background: #7c3aed; color: #fff; }
+        .meowapps-wpai-promo-btn-secondary:hover { background: #6527c9; color: #fff; }
+        .meowapps-wpai-promo-btn-dismiss {
+          margin-left: auto;
+          background: transparent; color: #6b7280;
+          font-weight: 500; padding: 7px 10px;
+        }
+        .meowapps-wpai-promo-btn-dismiss:hover { color: #1e1e1e; background: rgba(0,0,0,0.04); }
+      </style>
+      <script>
+      (function () {
+        var D = <?php echo wp_json_encode( $payload ); ?>;
+        try { if (localStorage.getItem('meowapps-wpai-promo-dismissed') === '1') return; } catch (e) {}
+
+        function build() {
+          var host = document.createElement('div');
+          host.className = 'meowapps-wpai-promo';
+          host.setAttribute('role', 'status');
+          var iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+          host.innerHTML = [
+            '<span class="meowapps-wpai-promo-icon">', iconSvg, '</span>',
+            '<div class="meowapps-wpai-promo-body">',
+              '<div class="meowapps-wpai-promo-text">',
+                '<strong></strong> <span class="meowapps-wpai-promo-sub"></span>',
+              '</div>',
+              '<div class="meowapps-wpai-promo-actions"></div>',
+            '</div>'
+          ].join('');
+          // Title carries an anchor on "AI Engine" → wp.org plugin page.
+          var strong = host.querySelector('strong');
+          strong.appendChild(document.createTextNode(D.titleBefore));
+          var tLink = document.createElement('a');
+          tLink.href = D.wporgUrl;
+          tLink.target = '_blank';
+          tLink.rel = 'noopener noreferrer';
+          tLink.className = 'meowapps-wpai-promo-titlelink';
+          tLink.textContent = D.titleLink;
+          strong.appendChild(tLink);
+          strong.appendChild(document.createTextNode(D.titleAfter));
+          host.querySelector('.meowapps-wpai-promo-sub').textContent = D.sub;
+          var actions = host.querySelector('.meowapps-wpai-promo-actions');
+
+          function link(label, cls, href, newTab) {
+            var a = document.createElement('a');
+            a.className = 'meowapps-wpai-promo-btn ' + cls;
+            a.textContent = label;
+            a.href = href;
+            if (newTab) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+            actions.appendChild(a);
+            return a;
+          }
+
+          // Install → WordPress's plugin-install search page, pre-filtered.
+          // User lands on a familiar screen with AI Engine as the top hit and
+          // can install with the native WordPress UX.
+          link(D.install, 'meowapps-wpai-promo-btn-primary',   D.installUrl, false);
+          link(D.learn,   'meowapps-wpai-promo-btn-secondary', D.learnUrl,   true);
+
+          var d = document.createElement('button');
+          d.type = 'button';
+          d.className = 'meowapps-wpai-promo-btn meowapps-wpai-promo-btn-dismiss';
+          d.textContent = D.dismiss;
+          d.addEventListener('click', function () {
+            try { localStorage.setItem('meowapps-wpai-promo-dismissed', '1'); } catch (e) {}
+            if (host.parentNode) host.parentNode.removeChild(host);
+          });
+          actions.appendChild(d);
+          return host;
+        }
+
+        function ensure() {
+          if (document.querySelector('.meowapps-wpai-promo')) return;
+          var page = document.querySelector('.connectors-page');
+          if (page) { page.insertBefore(build(), page.firstChild); return; }
+          var header = document.querySelector('.boot-layout__stage header');
+          if (header && header.parentNode) {
+            header.parentNode.insertBefore(build(), header.nextSibling);
+          }
+        }
+
+        var tries = 0;
+        var iv = setInterval(function () {
+          ensure();
+          if (document.querySelector('.meowapps-wpai-promo') || ++tries > 40) clearInterval(iv);
+        }, 120);
+
+        var app = document.getElementById('options-connectors-wp-admin-app')
+               || document.getElementById('options-connectors-app');
+        if (app && 'MutationObserver' in window) {
+          new MutationObserver(ensure).observe(app, { childList: true, subtree: true });
+        }
+      })();
+      </script>
+      <?php
     }
   }
 }

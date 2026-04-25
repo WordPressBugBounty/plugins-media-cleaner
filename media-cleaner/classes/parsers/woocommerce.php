@@ -119,10 +119,10 @@ function wpmc_scan_postmeta_woocommerce( $id ) {
 		foreach ( $galleries_images_wc as $thumbnail_id ) {
 			//* WooCommerce Gallery Images use srcset so the sizes URL are actually used
 			$urls = $wpmc->get_thumbnails_urls_from_srcset( $thumbnail_id );
-			$wpmc->add_reference_url( $urls, 'WOOCOMMERCE GALLERY (URL) {SAFE}', $id );
+			$wpmc->add_reference_url( $urls, 'WooCommerce Gallery {SAFE}', $id );
 		}
 
-		$wpmc->add_reference_id( $galleries_images_wc, 'WOOCOMMERCE GALLERY (ID)', $id );
+		$wpmc->add_reference_id( $galleries_images_wc, 'WooCommerce Gallery', $id );
 	}
 
 	// Product Variations - check if any exist first
@@ -152,8 +152,8 @@ function wpmc_scan_postmeta_woocommerce( $id ) {
 					if( empty( $thumbnail_id ) || !is_numeric( $thumbnail_id ) ) continue;
 
 					$urls = $wpmc->get_thumbnails_urls_from_srcset( intval( $thumbnail_id ) );
-					$wpmc->add_reference_url( $urls, 'WOOCOMMERCE VARIATIONS GALLERY (URL) {SAFE}', $id );
-					$wpmc->add_reference_id(  $thumbnail_id, 'WOOCOMMERCE VARIATIONS (ID)', $id );
+					$wpmc->add_reference_url( $urls, 'WooCommerce Variations Gallery {SAFE}', $id );
+					$wpmc->add_reference_id(  $thumbnail_id, 'WooCommerce Variations Gallery', $id );
 				}
 			}
 		}

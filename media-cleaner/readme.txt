@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 7.0.7
+Stable tag: 7.0.8
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,12 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.0.8 (2026/04/25) =
+* Update: Renamed internal origin references for clarity.
+* Update: Path descriptions now use 'thumbnails' instead of 'files' for clarity.
+* Fix: Image URLs in the metabox are now only added when actually present.
+* Update: Improved UI/UX for better user experience. We hope you'll love it! 🥰
 
 = 7.0.7 (2026/04/15) =
 * Add: New "References Buffer" option to split and flush reference processing to reduce memory errors on large datasets.

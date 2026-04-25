@@ -2179,7 +2179,7 @@ class Meow_WPMC_Core {
 						'time' => current_time('mysql'),
 						'type' => 1,
 						'size' => $size,
-						'path' => $mainfile . ( $countfiles > 0 ? ( " (+ " . $countfiles . " files)" ) : "" ),
+						'path' => $mainfile . ( $countfiles > 0 ? ( " (+ " . $countfiles . " thumbnails)" ) : "" ),
 						'postId' => $attachmentId,
 						'issue' => $issue
 						)
