@@ -414,9 +414,12 @@ class Meow_WPMC_Rest
 
 		$params = $request->get_json_params();
 		$path = isset( $params['path'] ) ? ltrim( $params['path'], '/\\' ) : null;
+		$offset = isset( $params['offset'] ) ? intval( $params['offset'] ) : 0;
+		$limitsize = $this->core->get_option( 'uploads_file_buffer' );
 
-		$files = $this->engine->get_files( $path );
+		$files = $this->engine->get_files( $path, $offset, $limitsize );
 		$files_count = count( $files );
+		$finished = $files_count < $limitsize;
 		$message = null;
 		if ( $files_count === 0 ) {
 			$message = sprintf( __( "No files for this path (%s).", 'media-cleaner' ), $path );
@@ -429,7 +432,9 @@ class Meow_WPMC_Rest
 			'success' => true, 
 			'message' => $message,
 			'data' => [
-				'results' => $files
+				'results' => $files,
+				'finished' => $finished,
+				'offset' => $offset + $files_count
 			],
 		];
 
@@ -706,13 +711,19 @@ class Meow_WPMC_Rest
 				)
 			);
 		} else {
+			$posts_table = $wpdb->posts;
 			$entries = $wpdb->get_results( 
 				$wpdb->prepare( "SELECT r.*
 					FROM $table_ref r
-					WHERE (r.mediaUrl LIKE %s)
+					LEFT JOIN $posts_table p ON r.origin = p.ID
+					WHERE (r.mediaId LIKE '%1\$s'
+					OR r.mediaUrl LIKE '%1\$s'
+					OR r.originType LIKE '%1\$s'
+					OR r.origin LIKE '%1\$s'
+					OR p.post_title LIKE '%1\$s')
 					$where_sql
 					$order_sql
-					LIMIT %d, %d", ( '%' . $search . '%' ), $skip, $limit
+					LIMIT %2\$d, %3\$d", ( '%' . $search . '%' ), $skip, $limit
 				)
 			);
 		}
@@ -1160,20 +1171,24 @@ class Meow_WPMC_Rest
 
 	function count_references($search, $referenceFilter) {
 		global $wpdb;
+		$table_ref = $wpdb->prefix . "mclean_refs";
+		$posts_table = $wpdb->posts;
 		$where_sqls = [];
+		$join_sql = '';
 		if (! empty($search) ) {
-			$where_sqls[] = $wpdb->prepare("AND mediaUrl LIKE %s", ( '%' . $search . '%' ));
+			$search_like = '%' . $wpdb->esc_like( $search ) . '%';
+			$where_sqls[] = $wpdb->prepare("AND (r.mediaId LIKE '%1\$s' OR r.mediaUrl LIKE '%1\$s' OR r.originType LIKE '%1\$s' OR r.origin LIKE '%1\$s' OR p.post_title LIKE '%1\$s')", $search_like);
+			$join_sql = "LEFT JOIN $posts_table p ON r.origin = p.ID";
 		}
 		if ( $referenceFilter !== 'showAll' ) {
 			if ($referenceFilter === 'mediaIds') {
-				$where_sqls[] = 'AND mediaId IS NOT NULL';
+				$where_sqls[] = 'AND r.mediaId IS NOT NULL';
 			} else if ($referenceFilter === 'mediaUrls') {
-				$where_sqls[] = 'AND mediaUrl IS NOT NULL';
+				$where_sqls[] = 'AND r.mediaUrl IS NOT NULL';
 			}
 		}
 		$where_sql = implode(' ', $where_sqls);
-		$table_ref = $wpdb->prefix . "mclean_refs";
-		return (int)$wpdb->get_var( "SELECT COUNT(id) FROM $table_ref WHERE 1=1 $where_sql" );
+		return (int)$wpdb->get_var( "SELECT COUNT(r.id) FROM $table_ref r $join_sql WHERE 1=1 $where_sql" );
 	}
 
 	function rest_get_stats( $request ) {

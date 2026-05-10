@@ -283,6 +283,11 @@ class Meow_WPMC_Support {
       array_push( $unsupported, 'LayerSlider' );
     }
 
+    //WP Download Manager
+    if ( defined( 'WPDM_VERSION' ) ) {
+      array_push( $unsupported, 'WP Download Manager' );
+    }
+
     return $unsupported;
   }
 }

@@ -2308,6 +2308,7 @@ class Meow_WPMC_Core {
 			'posts_buffer' => 5,
 			'analysis_buffer' => 100,
 			'file_op_buffer' => 20,
+			'uploads_file_buffer' => 5000,
 			'delay' => 100,
 			'refs_buffer' => 500,
 			'shortcodes_disabled' => false,

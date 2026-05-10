@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 7.0.8
+Stable tag: 7.0.9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,16 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.0.9 (2026/05/09) =
+* Fix: Meow Gallery parser now correctly applies WPLR filters on galleries and parses JSON HTML format.
+* Add: Support for Meow Gallery's collections with WPLR integration.
+* Add: Support for WP Download Manager plugin.
+* Add: Filter "wpmc_affect_html_from_builder" for page builders that store their own content, allowing other parsers to still work alongside them.
+* Update: Search now works across all reference fields.
+* 🎵 Discuss with others about Media Cleaner on [the Discord](https://discord.gg/bHDGh38).
+* 🌴 Keep us motivated with [a little review here](https://wordpress.org/support/plugin/media-cleaner/reviews/). Thank you!
+* 🥰 If you want to help us, check our [Patreon](https://www.patreon.com/meowapps). Thank you!
 
 = 7.0.8 (2026/04/25) =
 * Update: Renamed internal origin references for clarity.

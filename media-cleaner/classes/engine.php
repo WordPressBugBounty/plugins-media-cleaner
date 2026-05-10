@@ -324,8 +324,8 @@ SQL;
 	}
 
 	// Get files in /uploads (if path is null, the root of /uploads is returned)
-	function get_files( $path = null ) {
-		$files = apply_filters( 'wpmc_list_uploaded_files', null, $path );
+	function get_files( $path = null, $offset = 0, $limit = -1 ) {
+		$files = apply_filters( 'wpmc_list_uploaded_files', null, $path, $offset, $limit );
 		return $files ? $files : array();
 	}
 
