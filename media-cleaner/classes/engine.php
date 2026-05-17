@@ -44,6 +44,25 @@ SQL;
 		return $r;
 	}
 
+	/**
+	 * Returns the count of posts to check (memory-efficient alternative to count(get_posts_to_check()))
+	 * @return int
+	 */
+	function count_posts_to_check() {
+		global $wpdb;
+
+		$q = <<<SQL
+SELECT COUNT(p.ID) FROM $wpdb->posts p
+WHERE p.post_status NOT IN ('inherit', 'trash', 'auto-draft')
+AND p.post_type NOT IN ('attachment', 'shop_order', 'shop_order_refund', 'nav_menu_item', 'revision', 'auto-draft', 'wphb_minify_group', 'customize_changeset', 'oembed_cache', 'nf_sub', 'jp_img_sitemap')
+AND p.post_type NOT LIKE 'dlssus_%'
+AND p.post_type NOT LIKE 'ml-slide%'
+AND p.post_type NOT LIKE '%acf-%'
+AND p.post_type NOT LIKE '%edd_%'
+SQL;
+		return (int) $wpdb->get_var( $q );
+	}
+
 	// Parse the posts for references (based on $limit and $limitsize for paging the scan)
 	function extractRefsFromContent( $limit, $limitsize, &$message = '', $post_id = null ) {
 		if ( empty( $limit ) ) {
@@ -367,6 +386,30 @@ SQL;
 			$r = $wpdb->get_col( $q );
 
 		return $r;
+	}
+
+	/**
+	 * Returns the count of media entries (memory-efficient alternative to count(get_media_entries()))
+	 * @param bool $unattachedOnly
+	 * @return int
+	 */
+	function count_media_entries( $unattachedOnly = false ) {
+		global $wpdb;
+
+		$extraAnd = $unattachedOnly ? "AND p.post_parent = 0" : '';
+
+		$q = <<<SQL
+SELECT COUNT(p.ID) FROM $wpdb->posts p
+WHERE p.post_status = 'inherit'
+$extraAnd
+AND p.post_type = 'attachment'
+SQL;
+		if ( $this->core->get_option( 'images_only' ) ) {
+			$q .= " AND p.post_mime_type IN ( 'image/jpeg', 'image/gif', 'image/png', 'image/webp',
+				'image/bmp', 'image/tiff', 'image/x-icon', 'image/svg' )";
+		}
+
+		return (int) $wpdb->get_var( $q );
 	}
 
 	/*

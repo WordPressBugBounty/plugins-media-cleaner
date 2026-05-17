@@ -227,10 +227,10 @@ class Meow_WPMC_Rest
 		$src = isset( $params['source'] ) ? $params['source'] : null;
 		$num = 0;
 		if ( $src === 'posts' ) {
-			$num = count( $this->engine->get_posts_to_check() );
+			$num = $this->engine->count_posts_to_check();
 		}
 		else if ( $src === 'medias' ) {
-			$num = count( $this->engine->get_media_entries() );
+			$num = $this->engine->count_media_entries();
 		}
 		else {
 			return new WP_REST_Response( [ 

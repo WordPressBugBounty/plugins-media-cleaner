@@ -3,9 +3,9 @@ Contributors: TigrouMeow
 Tags: clean, media, files, images, library
 Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
-Tested up to: 6.9
+Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 7.0.9
+Stable tag: 7.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,11 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.1.0 (2026/05/17) =
+* Add: In-results banner and tooltip clarifying that files marked as "not found in content" may still be used dynamically by builders, templates, or external sites.
+* Fix: Memory overflow on large sites (1M+ media) by replacing in-memory array counting with SQL count queries.
+* Fix: Added check for existing table before deleting attachment-related data.
 
 = 7.0.9 (2026/05/09) =
 * Fix: Meow Gallery parser now correctly applies WPLR filters on galleries and parses JSON HTML format.

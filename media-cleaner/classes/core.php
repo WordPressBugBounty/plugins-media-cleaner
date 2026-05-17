@@ -194,9 +194,17 @@ class Meow_WPMC_Core {
 	}
 
 	function delete_attachment_related_data( $post_id ) {
+
+		if ( empty( $post_id ) ) return;
+		
 		global $wpdb;
 		$table_name = $wpdb->prefix . "mclean_scan";
-		$wpdb->query( $wpdb->prepare( "DELETE FROM $table_name WHERE postId = %d", $post_id ) );
+
+		if ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $wpdb->esc_like( $table_name ) ) ) === $table_name ) {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM $table_name WHERE postId = %d", $post_id ) );
+		} else {
+			// Table does not exist
+		}
 	}
 
 	function timeout_check_additem() {
