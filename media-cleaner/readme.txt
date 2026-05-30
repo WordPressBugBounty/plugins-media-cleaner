@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 7.1.0
+Stable tag: 7.1.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.1.1 (2026/05/30) =
+* Update: Full Cornerstone Parser coverage with URL references and improved data parsing.
+* Update: Refactored URL detection to work with relative URLs.
+* Add: Confirmation prompt before deleting the Cleaner database.
+* Fix: Sped up file deletion by replacing directory scanning with a lazy emptiness check.
+* Update: Made it clearer when viewing settings versus the dashboard.
 
 = 7.1.0 (2026/05/17) =
 * Add: In-results banner and tooltip clarifying that files marked as "not found in content" may still be used dynamically by builders, templates, or external sites.

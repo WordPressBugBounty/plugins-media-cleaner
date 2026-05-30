@@ -9,7 +9,7 @@ class Meow_WPMC_Core {
 	public $is_pro = false;
 	public $engine = null;
 	public $catch_timeout = true; // This will halt the plugin before reaching the PHP timeout.
-	public $types = "jpg|jpeg|jpe|gif|png|tiff|bmp|csv|svg|pdf|xls|xlsx|doc|docx|odt|wpd|rtf|tiff|mp3|mp4|mov|wav|lua|webp|avif|ico";
+	public $types = "jpg|jpeg|jpe|gif|png|tiff|bmp|csv|svg|pdf|xls|xlsx|doc|docx|odt|wpd|rtf|tiff|mp3|mp4|mov|wav|lua|webp|avif|ico|woff2|woff|ttf|otf";
 	public $current_method = 'media';
 	public $servername = null; // meowapps.com (site URL without http/https)
 	public $site_url = null; // https://meowapps.com
@@ -483,21 +483,30 @@ class Meow_WPMC_Core {
 		}
 	}
 
-	// SImply use regex to get URLs from a string return an array of URLs
+	// Simply use regex to get URLs from a string return an array of URLs
 	function get_urls_from_string( $string ) {
 		$urls = array();
-		// Replace the satinized urls with the real ones to be sure to get them in the regex
+		// Replace the sanitized urls with the real ones to be sure to get them in the regex
 		$string = str_replace( '\\', '', $string );
 
+		$patterns = array(
+			// Full URLs with protocol
+			'/(https?:\/\/[^\s\"\'\>\<\?\#]+\.(' . $this->types . '))/i',
+			
+			// Relative URLs starting with /wp-content/uploads or /uploads (without protocol)
+			'/(\/(?:wp-content\/)?uploads\/[^\s\"\'\>\<\?\#]+\.(' . $this->types . '))/i',
+		);
 
-		$pattern = '/(https?:\/\/[^\s\"\'\>\<\?\#]+\.(' . $this->types . '))/i';
-		if ( preg_match_all( $pattern, $string, $matches ) ) {
-			foreach ( $matches[0] as $match ) {
-				$clean_url = $this->clean_url( $match );
-				array_push( $urls, $clean_url );
+		foreach ( $patterns as $pattern ) {
+			if ( preg_match_all( $pattern, $string, $matches ) ) {
+				foreach ( $matches[0] as $match ) {
+					$clean_url = $this->clean_url( $match );
+					$urls[] = $clean_url;
+				}
 			}
 		}
-		return $urls;
+
+		return array_unique( $urls );
 	}
 
 	function get_urls_from_html( $html ) {
@@ -1179,11 +1188,20 @@ class Meow_WPMC_Core {
 			return;
 		else if ( $this->endsWith( $dir, 'uploads' ) )
 			return;
-		$found = array_diff( scandir( $dir ), array( '.', '..' ) );
-		if ( count( $found ) < 1 ) {
-			if ( rmdir( $dir ) ) {
-				$this->clean_dir( dirname( $dir ) );
-			}
+		// Use FilesystemIterator rather than scandir() to test emptiness: scandir() loads the
+		// entire directory listing into memory just to count it, which is extremely slow on
+		// uploads folders holding tens of thousands of files (a frequent source of "deletion is
+		// slow" reports). FilesystemIterator reads lazily, so valid() stops at the first entry.
+		// SKIP_DOTS is on by default, so '.' and '..' are ignored but hidden files (e.g. .htaccess)
+		// still count as non-empty — matching the previous array_diff() behavior exactly.
+		try {
+			$is_empty = !( new FilesystemIterator( $dir ) )->valid();
+		}
+		catch ( Exception $e ) {
+			return; // Directory not readable: leave it alone instead of risking a fatal.
+		}
+		if ( $is_empty && rmdir( $dir ) ) {
+			$this->clean_dir( dirname( $dir ) );
 		}
 	}
 
