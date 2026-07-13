@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 7.1.1
+Stable tag: 7.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,6 +48,12 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.0 (2026/07/12) =
+* Add: Resumable, checkpointed scan runs with staged results that publish only after complete analysis.
+* Add: Private quarantine storage, file identity validation, and idempotent cleanup operations.
+* Fix: Graceful handling of timeouts, transient server failures, stalled cursors, and parser compatibility queries.
+* Fix: Durable keyset pagination for large compatibility-parser datasets.
 
 = 7.1.1 (2026/05/30) =
 * Update: Full Cornerstone Parser coverage with URL references and improved data parsing.

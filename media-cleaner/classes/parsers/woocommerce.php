@@ -4,42 +4,11 @@ add_action( 'wpmc_scan_once', 'wpmc_scan_once_woocommerce' );
 add_action( 'wpmc_scan_postmeta', 'wpmc_scan_postmeta_woocommerce' );
 
 /**
- * Ensure database indexes exist for WooCommerce tables to improve query performance
+ * Kept for third-party compatibility. Media Cleaner must never alter WordPress
+ * core-table indexes during a scan.
  */
 function wpmc_ensure_woocommerce_indexes() {
-	global $wpdb;
-	static $wpmc_indexes_checked = false;
-	
-	// Only check once per request to avoid repeated SHOW INDEX queries
-	if ( $wpmc_indexes_checked ) {
-		return;
-	}
-	
-	// Check and create index on termmeta for meta_key queries
-	$index_exists = $wpdb->get_var( "SHOW INDEX FROM $wpdb->termmeta WHERE Key_name = 'meta_key_value_idx'" );
-	if ( !$index_exists ) {
-		$wpdb->query( "CREATE INDEX meta_key_value_idx ON $wpdb->termmeta (meta_key(191), meta_value(20))" );
-	}
-	
-	// Check and create index on term_taxonomy for taxonomy queries
-	$taxonomy_index = $wpdb->get_var( "SHOW INDEX FROM $wpdb->term_taxonomy WHERE Key_name = 'taxonomy_desc_idx'" );
-	if ( !$taxonomy_index ) {
-		$wpdb->query( "CREATE INDEX taxonomy_desc_idx ON $wpdb->term_taxonomy (taxonomy(32), description(50))" );
-	}
-	
-	// Check and create index on postmeta for meta_key queries
-	$postmeta_index = $wpdb->get_var( "SHOW INDEX FROM $wpdb->postmeta WHERE Key_name = 'post_meta_key_value_idx'" );
-	if ( !$postmeta_index ) {
-		$wpdb->query( "CREATE INDEX post_meta_key_value_idx ON $wpdb->postmeta (post_id, meta_key(191), meta_value(20))" );
-	}
-	
-	// Check and create index on posts for parent/type queries
-	$posts_index = $wpdb->get_var( "SHOW INDEX FROM $wpdb->posts WHERE Key_name = 'parent_type_idx'" );
-	if ( !$posts_index ) {
-		$wpdb->query( "CREATE INDEX parent_type_idx ON $wpdb->posts (post_parent, post_type)" );
-	}
-	
-	$wpmc_indexes_checked = true;
+	return true;
 }
 
 function wpmc_scan_once_woocommerce() {
@@ -48,24 +17,18 @@ function wpmc_scan_once_woocommerce() {
 	// Ensure indexes exist for better performance
 	wpmc_ensure_woocommerce_indexes();
 
-	// WooCommerce Categories Images - check if any exist first
-	$count_query = "SELECT COUNT(*) FROM $wpdb->termmeta WHERE meta_key LIKE '%thumbnail_id%' AND meta_value != '' AND meta_value IS NOT NULL";
-	$meta_count = $wpdb->get_var( $count_query );
-	
-	if ( $meta_count > 0 ) {
-		$query = "SELECT meta_value FROM $wpdb->termmeta WHERE meta_key LIKE '%thumbnail_id%' AND meta_value != '' AND meta_value IS NOT NULL";
-		$metas = $wpdb->get_col( $query );
-		
-		if ( count( $metas ) > 0 ) {
-			$postmeta_images_ids = array();
-			foreach ( $metas as $meta ) {
-				if ( is_numeric( $meta ) && $meta > 0 ) {
-					array_push( $postmeta_images_ids, $meta );
-				}
-			}
-			$wpmc->add_reference_id( $postmeta_images_ids, 'WOOCOMMERCE (ID)' );
+	$wpmc->run_paged_parser( 'woocommerce-category-images', function( $cursor, $limit ) use ( $wpdb ) {
+		return $wpdb->get_results( $wpdb->prepare( "SELECT meta_id, meta_value FROM $wpdb->termmeta WHERE meta_key LIKE '%%thumbnail_id%%' AND meta_value != '' AND meta_value IS NOT NULL AND meta_id > %d ORDER BY meta_id ASC LIMIT %d", $cursor, $limit ) );
+	}, function( $rows ) use ( $wpmc ) {
+		$ids = array();
+		foreach ( $rows as $row ) {
+			if ( is_numeric( $row->meta_value ) && (int) $row->meta_value > 0 ) $ids[] = (int) $row->meta_value;
 		}
-	}
+		if ( !empty( $ids ) ) $wpmc->add_reference_id( $ids, 'WOOCOMMERCE (ID)' );
+	}, 250, function( $rows, $cursor ) {
+		$last = end( $rows );
+		return $last ? (int) $last->meta_id : $cursor;
+	} );
 
 	// PlaceHolder Image ID
 	$placeholder_id = get_option( 'woocommerce_placeholder_image', null, true );
@@ -73,22 +36,16 @@ function wpmc_scan_once_woocommerce() {
 		$wpmc->add_reference_id( (int)$placeholder_id, 'WOOCOMMERCE (ID)' );
 	}
 
-	// Images in Product Category Descriptions - check if any exist first
-	$desc_count_query = "SELECT COUNT(*) FROM $wpdb->term_taxonomy WHERE taxonomy = 'product_cat' AND description <> '' AND description IS NOT NULL";
-	$desc_count = $wpdb->get_var( $desc_count_query );
-	
-	if ( $desc_count > 0 ) {
-		$query = "SELECT description FROM $wpdb->term_taxonomy WHERE taxonomy = 'product_cat' AND description <> '' AND description IS NOT NULL";
-		$descs = $wpdb->get_col( $query );
-		
-		if ( count( $descs ) > 0 ) {
-			$postmeta_images_urls = [];
-			foreach ( $descs as $desc ) {
-				$postmeta_images_urls = array_merge( $postmeta_images_urls, $wpmc->get_urls_from_html( $desc ) );
-			}
-			$wpmc->add_reference_url( $postmeta_images_urls, 'WOOCOMMERCE (URL)' );
+	$wpmc->run_paged_parser( 'woocommerce-category-descriptions', function( $cursor, $limit ) use ( $wpdb ) {
+		return $wpdb->get_results( $wpdb->prepare( "SELECT term_taxonomy_id, description FROM $wpdb->term_taxonomy WHERE taxonomy = 'product_cat' AND description <> '' AND description IS NOT NULL AND term_taxonomy_id > %d ORDER BY term_taxonomy_id ASC LIMIT %d", $cursor, $limit ) );
+	}, function( $rows ) use ( $wpmc ) {
+		foreach ( $rows as $row ) {
+			$wpmc->add_reference_url( $wpmc->get_urls_from_html( $row->description ), 'WOOCOMMERCE (URL)' );
 		}
-	}
+	}, 100, function( $rows, $cursor ) {
+		$last = end( $rows );
+		return $last ? (int) $last->term_taxonomy_id : $cursor;
+	} );
 }
 
 function wpmc_scan_postmeta_woocommerce( $id ) {
@@ -125,12 +82,13 @@ function wpmc_scan_postmeta_woocommerce( $id ) {
 		$wpmc->add_reference_id( $galleries_images_wc, 'WooCommerce Gallery', $id );
 	}
 
-	// Product Variations - check if any exist first
-	$variations_count = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $wpdb->posts WHERE post_parent = %d AND post_type = 'product_variation'", $id ) );
+	$first_variation = $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE post_parent = %d AND post_type = 'product_variation' ORDER BY ID ASC LIMIT 1", $id ) );
+	if ( $wpdb->last_error ) throw new RuntimeException( sprintf( __( 'WooCommerce variation parser database error: %s', 'media-cleaner' ), $wpdb->last_error ) );
+	if ( !$first_variation ) return;
 
-	if ( $variations_count > 0 ) {
-		$variations = $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE post_parent = %d AND post_type = 'product_variation'", $id ) );
-
+	$wpmc->run_paged_parser( 'woocommerce-variations-' . $id, function( $cursor, $limit ) use ( $wpdb, $id ) {
+		return $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE post_parent = %d AND post_type = 'product_variation' AND ID > %d ORDER BY ID ASC LIMIT %d", $id, $cursor, $limit ) );
+	}, function( $variations ) use ( $wpdb, $wpmc, $id ) {
 		foreach ( $variations as $variation_id ) {
 			$gallery_variations = array();
 
@@ -157,7 +115,10 @@ function wpmc_scan_postmeta_woocommerce( $id ) {
 				}
 			}
 		}
-	}
+	}, 25, function( $variations, $cursor ) {
+		$last = end( $variations );
+		return $last ? (int) $last : $cursor;
+	} );
 }
 
 ?>

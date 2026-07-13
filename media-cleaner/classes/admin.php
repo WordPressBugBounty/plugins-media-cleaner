@@ -42,18 +42,22 @@ class Meow_WPMC_Admin extends MeowKit_WPMC_Admin {
     $options = array_merge( $this->core->get_all_options(), [
       'incompatible_plugins' => Meow_WPMC_Support::get_issues(),
       'native_plugins'       => Meow_WPMC_Support::get_natives(),
+      'scan_progress'        => $this->core->get_progress(),
     ] );
 
     // Localize and options
     wp_localize_script( 'wpmc_media_cleaner', 'wpmc_media_cleaner', [
       'api_url' => rest_url( 'media-cleaner/v1' ),
       'rest_url' => rest_url(),
+      'admin_url' => admin_url(),
       'plugin_url' => WPMC_URL,
       'prefix' => WPMC_PREFIX,
       'domain' => WPMC_DOMAIN,
       'is_pro' => class_exists( 'MeowPro_WPMC_Core' ),
       'is_registered' => !!$this->is_registered(),
       'rest_nonce' => wp_create_nonce( 'wp_rest' ),
+      'cleanup_allowed' => $this->core->runs ? $this->core->runs->cleanup_allowed() : false,
+			'schema_ready' => $this->core->runs ? $this->core->runs->tables_exist() : false,
       'options' => $options
     ] );
   }

@@ -34,6 +34,7 @@ AND p.post_type NOT LIKE 'ml-slide%'
 AND p.post_type NOT LIKE '%acf-%'
 AND p.post_type NOT LIKE '%edd_%'
 SQL;
+		$q .= " ORDER BY p.ID ASC";
 		if ( $offset >= 0 && $size >= 0 ) {
 			$q .= " LIMIT %d, %d";
 			$r = $wpdb->get_col( $wpdb->prepare( $q, $offset, $size ) );
@@ -64,19 +65,14 @@ SQL;
 	}
 
 	// Parse the posts for references (based on $limit and $limitsize for paging the scan)
-	function extractRefsFromContent( $limit, $limitsize, &$message = '', $post_id = null ) {
-		if ( empty( $limit ) ) {
-			$this->core->reset_issues();
-			$this->core->reset_references();
-			$this->core->reset_progress(  );
-		}
-
+	function extractRefsFromContent( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
+		$processed = 0;
 		$method = $this->core->current_method;
 
 
 		// Check content is a different option depending on the method
 		$check_content = false;
-		if ( $method === 'media' ) {
+		if ( $method === 'media' || $method === 'duplicates' ) {
 			$check_content = $this->core->get_option( 'content' );
 		}
 		else if ( $method === 'files' ) {
@@ -94,7 +90,8 @@ SQL;
 		}
 
 		// Initialize the parsers
-		do_action( 'wpmc_initialize_parsers' );
+		$this->core->timeout_check_start( $limitsize );
+		$this->core->safe_do_action( 'wpmc_initialize_parsers' );
 
 		$posts = $post_id !== null ? [ $post_id ] : $this->get_posts_to_check( $limit, $limitsize );
 
@@ -103,27 +100,31 @@ SQL;
 			$this->core->log( "🏁 Extracting refs from content..." );
 			//if ( get_option( 'wpmc_widgets', false ) ) {
 				global $wp_registered_widgets;
-				$syswidgets = $wp_registered_widgets;
+				$syswidgets = is_array( $wp_registered_widgets ) ? $wp_registered_widgets : array();
 				$active_widgets = get_option( 'sidebars_widgets' );
+				$active_widgets = is_array( $active_widgets ) ? $active_widgets : array();
 				foreach ( $active_widgets as $sidebar_name => $widgets ) {
 					if ( $sidebar_name != 'wp_inactive_widgets' && !empty( $widgets ) && is_array( $widgets ) ) {
 						foreach ( $widgets as $key => $widget ) {
-							do_action( 'wpmc_scan_widget', $syswidgets[$widget] );
+							if ( isset( $syswidgets[ $widget ] ) ) $this->core->safe_do_action( 'wpmc_scan_widget', $syswidgets[ $widget ] );
 						}
 					}
 				}
-				do_action( 'wpmc_scan_widgets' );
+				$this->core->safe_do_action( 'wpmc_scan_widgets' );
 			//}
-			do_action( 'wpmc_scan_once' );
+			$this->core->safe_do_action( 'wpmc_scan_once' );
 
 			
 		}
 
-		$this->core->timeout_check_start( count( $posts ) );
-
 		$is_debug = $this->core->is_debug();
+		$yielded = false;
 
 		foreach ( $posts as $post ) {
+			if ( $this->core->timeout_should_yield() ) {
+				$yielded = true;
+				break;
+			}
 			$this->core->timeout_check();
 
 			// Debug logging for timeout detection
@@ -137,9 +138,9 @@ SQL;
 
 			// Check content
 			if ( $check_content ) {
-				do_action( 'wpmc_scan_postmeta', $post );
+				$this->core->safe_do_action( 'wpmc_scan_postmeta', $post );
 				$html = get_post_field( 'post_content', $post );
-				do_action( 'wpmc_scan_post', $html, $post );
+				$this->core->safe_do_action( 'wpmc_scan_post', $html, $post );
 			}
 
 			// Extra scanning methods
@@ -151,18 +152,23 @@ SQL;
 			}
 
 			$this->core->timeout_check_additem();
+			$processed++;
 		}
 
 		// Write the references found (and cached) by the parsers
 		$this->core->write_references();
-		$this->core->save_progress( 'extractReferencesFromContent', array(
+		$progress_phase = $post_id !== null ? 'extractReferencesFromContentPartial' : 'extractReferencesFromContent';
+		$this->core->save_progress( $progress_phase, array(
 			'type' => 'content',
 			'limit' => $limit,
-			'limitSize' => $limitsize
+			'limitSize' => $limitsize,
+			'next' => $limit + $processed,
+			'processed' => $processed,
+			'postId' => $post_id,
 		) );
 
-		$finished = count( $posts ) < $limitsize;
-		if ( $finished )
+		$finished = !$yielded && $processed === count( $posts ) && ( $post_id !== null || count( $posts ) < $limitsize );
+		if ( $finished && $post_id === null )
 		{
 			$this->core->log();
 			$this->core->save_progress( 'extractReferencesFromContent_finished' );
@@ -171,14 +177,16 @@ SQL;
 		$elapsed = $this->core->timeout_get_elapsed();
 		$message = sprintf(
 			// translators: %1$d is number of posts, %2$s is time in milliseconds
-			__( "Extracted references from %1\$d posts in %2\$s.", 'media-cleaner' ), count( $posts ), $elapsed
+			__( "Extracted references from %1\$d posts in %2\$s.", 'media-cleaner' ), $processed, $elapsed
 		);
 		return $finished;
 	}
 
-	function extractRefsFromThumbnails( $limit, $limitsize ) {
+	function extractRefsFromThumbnails( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
 		$medias = $this->get_media_entries( $limit, $limitsize, false );
-		require_once ABSPATH . 'wp-admin/includes/image.php';
+		$processed = 0;
+		$yielded = false;
+		$this->core->timeout_check_start( count( $medias ) );
 
 		// Get the sizes that should be marked as issues
 		$force_issue_sizes = $this->core->get_option( 'thumbnail_force_issues' );
@@ -186,7 +194,12 @@ SQL;
 			$force_issue_sizes = [];
 		}
 
-		foreach ( $medias as $media_id ) {			
+		foreach ( $medias as $media_id ) {
+			if ( $this->core->timeout_should_yield() ) {
+				$yielded = true;
+				break;
+			}
+			$this->core->timeout_check();
 			$file = get_attached_file( $media_id );
 			$meta = wp_get_attachment_metadata( $media_id );
 
@@ -197,18 +210,14 @@ SQL;
 			// Get the current registered image sizes
 			$needed_sizes = wp_get_registered_image_subsizes();
 			
-			foreach ( $needed_sizes as $size => $size_data ) {
+			foreach ( array_keys( $needed_sizes ) as $size ) {
 				$image_path = path_join( dirname( $file ), $meta['sizes'][ $size ]['file'] ?? '' );
 				$file_exists = isset( $meta['sizes'][ $size ] ) && file_exists( $image_path ) && filesize( $image_path ) > 0;
-				// Generate the thumbnail size.
-				$resized = null;
-				$origin = "{OG_THUMB}";
-				if( !$file_exists ) {
-					$resized = image_make_intermediate_size( $file, $size_data['width'], $size_data['height'], $size_data['crop'] ?? true );
-					$origin = "{GEN_THUMB}";
+				if ( !$file_exists ) {
+					continue;
 				}
 
-				$image_path = $this->core->clean_url( $image_path );
+				$image_path = $this->core->clean_uploaded_filename( $image_path );
 
 				// Check if this size should be marked as an issue instead of a reference
 				if ( in_array( $size, $force_issue_sizes ) ) {
@@ -218,72 +227,110 @@ SQL;
 					// Add a reference for generated thumbnail
 					$this->core->add_reference_url(
 						$image_path,
-						$origin  . $size,
+						"{OG_THUMB}" . $size,
 						$media_id, ['force_cache' => true ]
 					);
 				}
-
-				if ( $resized ) {
-					$meta['sizes'][ $size ] = $resized;
-				}
 			}
-
-			wp_update_attachment_metadata( $media_id, $meta );
+			$this->core->timeout_check_additem();
+			$processed++;
 		}
 
 		$this->core->write_references();
 		$this->core->save_progress( 'extractReferencesFromThumbnails', array(
 			'type' => 'thumbnails',
 			'limit' => $limit,
-			'limitSize' => $limitsize
+			'limitSize' => $limitsize,
+			'next' => $limit + $processed,
+			'processed' => $processed,
 		) );
 
-		$finished = count( $medias ) < $limitsize;
+		$finished = !$yielded && $processed === count( $medias ) && count( $medias ) < $limitsize;
 
 		if ( $finished )
 		{
 			$this->core->save_progress( 'extractReferencesFromThumbnails_finished' );
 			$this->core->log("Finished extracting refs from Thumbnails.");
 		}
+		$message = sprintf( __( 'Analyzed %d media thumbnail sets.', 'media-cleaner' ), $processed );
 
 		return $finished;
 	}
 
 
 	// For each media, let's get a hash of the file and add it as a reference
-	function extractRefsFromDuplicates( $limit, $limitsize ) {
+	function extractRefsFromDuplicates( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
 		$medias = $this->get_media_entries( $limit, $limitsize, false );
-		
+		$processed = 0;
+		$yielded = false;
+		$this->core->timeout_check_start( count( $medias ) );
 		foreach ( $medias as $media ) {
-			$paths = $this->core->get_paths_from_attachment( $media );
-			foreach ( $paths as $path ) {
-				$fullPath = trailingslashit( $this->core->upload_path ) . $path;
-				if ( file_exists( $fullPath ) ) {
-					$hash = md5_file( $fullPath );
-					$this->core->add_reference_url($path, 'HASH:' . $hash, null, ['force_cache' => true ]);
-				}
+			if ( $this->core->timeout_should_yield() ) {
+				$yielded = true;
+				break;
 			}
+			$this->core->timeout_check();
+			$full_path = get_attached_file( $media );
+			if ( !$full_path || !is_file( $full_path ) || !is_readable( $full_path ) || is_link( $full_path ) ) {
+				throw new RuntimeException( sprintf( __( 'Duplicate analysis could not read the original file for Media #%d.', 'media-cleaner' ), $media ) );
+			}
+			try {
+				$hash = $this->hash_file_safely( $full_path, $media );
+			}
+			catch ( Meow_WPMC_Transient_Exception $e ) {
+				if ( $processed === 0 ) {
+					throw new RuntimeException( sprintf( __( 'Media #%d is too large or slow to hash within this server request budget.', 'media-cleaner' ), $media ), 0, $e );
+				}
+				$yielded = true;
+				break;
+			}
+			$path = $this->core->clean_uploaded_filename( $full_path );
+			$this->core->add_reference_url( $path, 'HASH:' . $hash, $media, array( 'force_cache' => true ) );
+			$this->core->timeout_check_additem();
+			$processed++;
 		}
 
 		$this->core->write_references();
 		$this->core->save_progress( 'extractReferencesFromDuplicates', array(
 			'type' => 'duplicates',
 			'limit' => $limit,
-			'limitSize' => $limitsize
+			'limitSize' => $limitsize,
+			'next' => $limit + $processed,
+			'processed' => $processed,
 		) );
 
-		$finished = count( $medias ) < $limitsize;
+		$finished = !$yielded && $processed === count( $medias ) && count( $medias ) < $limitsize;
 		if ( $finished )
 		{
 			$this->core->save_progress( 'extractReferencesFromDuplicates_finished' );
 			$this->core->log("Finished extracting refs from Duplicates.");
 		}
+		$message = sprintf( __( 'Hashed %d media files.', 'media-cleaner' ), $processed );
 
 		return $finished;
 	}
 
+	private function hash_file_safely( $path, $media_id ) {
+		$handle = @fopen( $path, 'rb' );
+		if ( !$handle ) throw new RuntimeException( sprintf( __( 'Duplicate analysis could not open the original file for Media #%d.', 'media-cleaner' ), $media_id ) );
+		$context = hash_init( 'sha256' );
+		try {
+			while ( !feof( $handle ) ) {
+				$this->core->timeout_check();
+				$chunk = fread( $handle, 1024 * 1024 );
+				if ( $chunk === false ) throw new RuntimeException( sprintf( __( 'Duplicate analysis could not read the original file for Media #%d.', 'media-cleaner' ), $media_id ) );
+				if ( $chunk !== '' ) hash_update( $context, $chunk );
+			}
+		}
+		finally {
+			fclose( $handle );
+		}
+		return hash_final( $context );
+	}
+
 	// Parse the posts for references (based on $limit and $limitsize for paging the scan)
-	function extractRefsFromLibrary( $limit, $limitsize, &$message = '', $post_id = null ) {
+	function extractRefsFromLibrary( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
+		$processed = 0;
 		$method = $this->core->current_method;
 		if ( $method == 'media' ) {
 			$message = __( "Skipped, as it is not needed for the Media Library method.", 'media-cleaner' );
@@ -303,30 +350,40 @@ SQL;
 		}
 
 		$this->core->timeout_check_start( count( $medias ) );
+		$yielded = false;
 		foreach ( $medias as $media ) {
+			if ( $this->core->timeout_should_yield() ) {
+				$yielded = true;
+				break;
+			}
 			$this->core->timeout_check();
 			// Check the media
 			$paths = $this->core->get_paths_from_attachment( $media );
 			$this->core->add_reference_url( $paths, 'MEDIA LIBRARY' );
 			$this->core->timeout_check_additem();
+			$processed++;
 		}
 
 		// Write the references found (and cached) by the parsers
 		$this->core->write_references();
-		$this->core->save_progress( 'extractReferencesFromLibrary', array(
+		$progress_phase = $post_id !== null ? 'extractReferencesFromLibraryPartial' : 'extractReferencesFromLibrary';
+		$this->core->save_progress( $progress_phase, array(
 			'type' => 'library',
 			'limit' => $limit,
-			'limitSize' => $limitsize
+			'limitSize' => $limitsize,
+			'next' => $limit + $processed,
+			'processed' => $processed,
+			'postId' => $post_id,
 		) );
 
-		$finished = count( $medias ) < $limitsize;
-		if ( $finished )
+		$finished = !$yielded && $processed === count( $medias ) && ( $post_id !== null || count( $medias ) < $limitsize );
+		if ( $finished && $post_id === null )
 		{
 			$this->core->save_progress( 'extractReferencesFromLibrary_finished' );
 			$this->core->log("Finished extracting refs from Media Library.");
 		}
 		$elapsed = $this->core->timeout_get_elapsed();
-		$message = sprintf( __( "Extracted references from %d medias in %s.", 'media-cleaner' ), count( $medias ), $elapsed );
+		$message = sprintf( __( "Extracted references from %d medias in %s.", 'media-cleaner' ), $processed, $elapsed );
 		return $finished;
 	}
 
@@ -334,10 +391,20 @@ SQL;
 		STEP 2: List the media entries (or files)
 	*/
 
-	function get_hash_duplicates() {
+	function get_hash_duplicates( $offset = 0, $limit = 100 ) {
 		// Get the hashes from the referenes ( unique ones ) 
 		global $wpdb;
-		$hashes = $wpdb->get_col( "SELECT DISTINCT originType FROM {$wpdb->prefix}mclean_refs" );
+		$run_id = $this->core->get_run_id();
+		$table = $wpdb->prefix . 'mclean_refs';
+		$hashes = $wpdb->get_col( $wpdb->prepare(
+			"SELECT originType FROM $table
+			WHERE run_id = %d AND originType LIKE 'HASH:%%'
+			GROUP BY originType HAVING COUNT(DISTINCT mediaUrl) > 1
+			ORDER BY originType ASC LIMIT %d, %d",
+			$run_id,
+			max( 0, (int) $offset ),
+			max( 1, min( 500, (int) $limit ) )
+		) );
 
 		return $hashes;	
 	}
@@ -346,6 +413,15 @@ SQL;
 	function get_files( $path = null, $offset = 0, $limit = -1 ) {
 		$files = apply_filters( 'wpmc_list_uploaded_files', null, $path, $offset, $limit );
 		return $files ? $files : array();
+	}
+
+	function get_file_page_info( $fallback_count = 0, $limit = -1 ) {
+		$default = array(
+			'scanned' => $fallback_count,
+			'finished' => $limit < 1 || $fallback_count < $limit,
+			'skipped' => array(),
+		);
+		return apply_filters( 'wpmc_file_page_info', $default );
 	}
 
 	/**
@@ -377,6 +453,7 @@ SQL;
 			$q .= " AND p.post_mime_type IN ( 'image/jpeg', 'image/gif', 'image/png', 'image/webp',
 				'image/bmp', 'image/tiff', 'image/x-icon', 'image/svg' )";
 		}
+		$q .= " ORDER BY p.ID ASC";
 
 		if ( $offset >= 0 && $size >= 0 ) {
 			$q .= " LIMIT %d, %d";
@@ -419,36 +496,45 @@ SQL;
 	function check_duplicates( $hash ) {
 		// Check if the hash exists in the database
 		global $wpdb;
-		$table_name_issues = $wpdb->prefix . "mclean_scan";
 		$table_name_refs = $wpdb->prefix . "mclean_refs";
+		$run_id = $this->core->get_run_id();
 
-		$request = ( $wpdb->prepare( "SELECT mediaUrl FROM $table_name_refs WHERE originType LIKE %s", $hash ) );
+		$request = $wpdb->prepare(
+			"SELECT mediaUrl, MIN(mediaId) AS mediaId FROM $table_name_refs
+			WHERE run_id = %d AND originType = %s AND mediaUrl IS NOT NULL
+			GROUP BY mediaUrl
+			ORDER BY mediaUrl ASC",
+			$run_id,
+			$hash
+		);
 
-		$medias = $wpdb->get_col( $request );
+		$medias = $wpdb->get_results( $request );
 
 		if( count( $medias ) <= 1 ) {
 			// No issue
 			return false;
 		}
 
+		// Protect one deterministic canonical copy from cleanup.
+		array_shift( $medias );
 		foreach ( $medias as $media ) {
-			$filepath = trailingslashit( $this->core->upload_path ) . stripslashes( $media );
-			$clean_path = $this->core->clean_uploaded_filename( $media );
-			$filesize = file_exists( $filepath ) ? filesize ($filepath) : 0;
-			// Let's find out if there is a parentId for this file
-			$potentialParentPath = $this->core->clean_url_from_resolution( $clean_path );
-			$parentId = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table_name_issues WHERE path = %s", $potentialParentPath ) );
-			$parentId = $parentId ? (int)$parentId : null;
-			$wpdb->insert( $table_name_issues,
-				array(
-					'time' => current_time('mysql'),
-					'type' => 0,
-					'path' => $clean_path,
-					'size' => $filesize,
-					'issue' => 'DUPLICATE',
-					'parentId' => $parentId
-				)
-			);
+			$media_id = (int) $media->mediaId;
+			$media_url = (string) $media->mediaUrl;
+			$referenced = $wpdb->get_var( $wpdb->prepare(
+				"SELECT 1 FROM $table_name_refs
+				WHERE run_id = %d AND originType NOT LIKE 'HASH:%%'
+				AND ((%d > 0 AND mediaId = %d) OR (mediaUrl_hash = %s AND mediaUrl = %s))
+				LIMIT 1",
+				$run_id,
+				$media_id,
+				$media_id,
+				hash( 'sha256', $media_url ),
+				$media_url
+			) );
+			if ( $referenced ) {
+				continue;
+			}
+			$this->core->add_issue( $media_url, 'DUPLICATE' );
 		}
 
 		return true;
@@ -465,25 +551,7 @@ SQL;
 		$issue = apply_filters( 'wpmc_check_file', false, $file );
 		$used = $issue === true;
 		if ( !$used ) {
-			global $wpdb;
-			$filepath = trailingslashit( $this->core->upload_path ) . stripslashes( $file );
-			$clean_path = $this->core->clean_uploaded_filename( $file );
-			$table_name = $wpdb->prefix . "mclean_scan";
-			$filesize = file_exists( $filepath ) ? filesize ($filepath) : 0;
-			// Let's find out if there is a parentId for this file
-			$potentialParentPath = $this->core->clean_url_from_resolution( $clean_path );
-			$parentId = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table_name WHERE path = %s", $potentialParentPath ) );
-			$parentId = $parentId ? (int)$parentId : null;
-			$wpdb->insert( $table_name,
-				array(
-					'time' => current_time('mysql'),
-					'type' => 0,
-					'path' => $clean_path,
-					'size' => $filesize,
-					'issue' => $issue,
-					'parentId' => $parentId
-				)
-			);
+			$this->core->add_issue( $file, is_string( $issue ) ? $issue : 'NO_CONTENT' );
 		}
 		return $used;
 	}

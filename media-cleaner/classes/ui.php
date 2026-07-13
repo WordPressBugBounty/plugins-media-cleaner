@@ -3,6 +3,7 @@
 class Meow_WPMC_UI {
 
 	private $core = null;
+	private $schema_ready = null;
 
 	private $foundTypes = array(
 		"CONTENT" => "Found in content.",
@@ -49,7 +50,6 @@ class Meow_WPMC_UI {
 	}
 
 	public function cleaner_dashboard() {
-		wpmc_check_database();
 		echo '<div id="wpmc-dashboard"></div>';
 	}
 
@@ -61,7 +61,20 @@ class Meow_WPMC_UI {
 		add_meta_box( 'mfrh_media_usage_box', 'Media Cleaner', array( $this, 'display_metabox' ), 'attachment', 'side', 'default' );
 	}
 
+	private function ensure_schema() {
+		if ( $this->schema_ready !== null ) return $this->schema_ready;
+		if ( !$this->core->runs ) {
+			$this->core->runs = new Meow_WPMC_Runs( $this->core );
+		}
+		$this->schema_ready = $this->core->runs->maybe_upgrade();
+		return $this->schema_ready;
+	}
+
 	function display_metabox( $post ) {
+		if ( !$this->ensure_schema() ) {
+			echo esc_html__( 'Media Cleaner could not prepare its database tables. Open the Cleaner dashboard for details.', 'media-cleaner' );
+			return;
+		}
 		// Search the references to the ID
 		$originType = $this->core->reference_exists( null, $post->ID );
 
@@ -107,21 +120,23 @@ class Meow_WPMC_UI {
 	}
 
 	function media_row_actions( $actions, $post ) {
-		wpmc_check_database();
 		global $current_screen;
-		if ( 'upload' != $current_screen->id )
+		if ( !$current_screen || 'upload' != $current_screen->id )
 		    return $actions;
+		if ( !$this->ensure_schema() ) return $actions;
 		global $wpdb;
 		$table_name = $wpdb->prefix . "mclean_scan";
-		$res = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table_name WHERE postId = %d", $post->ID ) );
+		$run_id = $this->core->get_run_id();
+		$res = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table_name WHERE run_id = %d AND postId = %d LIMIT 1", $run_id, $post->ID ) );
+		$dashboard_url = esc_url( admin_url( 'upload.php?page=wpmc_dashboard' ) );
 		if ( !empty( $res ) && isset( $actions['delete'] ) )
-			$actions['delete'] = "<a href='?page=wpmc_dashboard'>" .
+			$actions['delete'] = "<a href='{$dashboard_url}'>" .
 				__( 'Delete with Media Cleaner', 'media-cleaner' ) . "</a>";
 		if ( !empty( $res ) && isset( $actions['trash'] ) )
-			$actions['trash'] = "<a href='?page=wpmc_dashboard'>" .
+			$actions['trash'] = "<a href='{$dashboard_url}'>" .
 				__( 'Trash with Media Cleaner', 'media-cleaner' ) . "</a>";
 		if ( !empty( $res ) && isset( $actions['untrash'] ) ) {
-			$actions['untrash'] = "<a href='?page=wpmc_dashboard>" .
+			$actions['untrash'] = "<a href='{$dashboard_url}'>" .
 				__( 'Restore with Media Cleaner', 'media-cleaner' ) . "</a>";
 		}
 		return $actions;

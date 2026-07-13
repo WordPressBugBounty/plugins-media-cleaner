@@ -5,19 +5,22 @@ add_action( 'wpmc_scan_widgets', 'wpmc_scan_widgets_metaslider' );
 function wpmc_scan_widgets_metaslider() {
 	global $wpdb;
 	global $wpmc;
-	$q = "SELECT object_id
+	$wpmc->run_paged_parser( 'metaslider-images', function( $cursor, $limit ) use ( $wpdb ) {
+		return $wpdb->get_results( $wpdb->prepare( "SELECT DISTINCT object_id
 		FROM {$wpdb->term_relationships}
 		WHERE object_id > 0
+		AND object_id > %d
 		AND term_taxonomy_id
-		IN (SELECT term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE taxonomy = 'ml-slider');";
-	$imageIds = $wpdb->get_col( $q );
-	if ( $wpdb->last_error ) {
-		error_log( $q . " " . $wpdb->last_error );
-		$wpmc->log( $q . " " . $wpdb->last_error );
-		die( $wpdb->last_error );
-	}
-	if ( count( $imageIds) > 0 ) {
-		$wpmc->add_reference_id( $imageIds, 'SLIDER (ID)' );
-	}
+		IN (SELECT term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE taxonomy = 'ml-slider')
+		ORDER BY object_id ASC LIMIT %d", $cursor, $limit ) );
+	}, function( $rows ) use ( $wpmc ) {
+		$imageIds = wp_list_pluck( $rows, 'object_id' );
+		if ( !empty( $imageIds ) ) {
+			$wpmc->add_reference_id( $imageIds, 'SLIDER (ID)' );
+		}
+	}, 250, function( $rows, $cursor ) {
+		$last = end( $rows );
+		return $last ? (int) $last->object_id : $cursor;
+	} );
 }
 ?>

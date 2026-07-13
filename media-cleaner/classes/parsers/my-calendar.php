@@ -9,45 +9,40 @@ add_action( 'wpmc_scan_widgets', 'wpmc_scan_widgets_mycalendar' );
 function wpmc_scan_widgets_mycalendar() {
 	global $wpmc;
 	global $wpdb;
-	$eventurls = array();
-	$q = "SELECT event_desc, event_short, event_link, event_url, event_image FROM " . $wpdb->prefix . "my_calendar WHERE
-		 (LOWER(event_desc) like '%http%' or
-		 LOWER(event_short) like '%http%' or
-		 LOWER(event_link) like 'http%' or
-		 LOWER(event_image) like 'http%' or
-		 LOWER(event_url) like 'http%');";
-	$rows = $wpdb->get_results( $q, ARRAY_N );
-	if ( $wpdb->last_error ) {
-		error_log( $q . " " . $wpdb->last_error );
-		$wpmc->log( $q . " " . $wpdb->last_error );
-		die( $wpdb->last_error );
-	}
-	if ( count( $rows ) > 0 ) {
+	$table = $wpdb->prefix . 'my_calendar';
+	$wpmc->run_paged_parser( 'my-calendar-events', function( $cursor, $limit ) use ( $wpdb, $table ) {
+		return $wpdb->get_results( $wpdb->prepare( "SELECT event_id, event_desc, event_short, event_link, event_url, event_image FROM {$table} WHERE
+		 (LOWER(event_desc) like '%%http%%' or
+		 LOWER(event_short) like '%%http%%' or
+		 LOWER(event_link) like 'http%%' or
+		 LOWER(event_image) like 'http%%' or
+		 LOWER(event_url) like 'http%%') AND event_id > %d ORDER BY event_id ASC LIMIT %d", $cursor, $limit ) );
+	}, function( $rows ) use ( $wpmc ) {
+		$eventurls = array();
 		foreach ( $rows as $row ) {
-			if ( !empty($row[0]) ) { // event_desc
-				$urls =  $wpmc->get_urls_from_html( $row[0] );
+			if ( !empty($row->event_desc) ) {
+				$urls = $wpmc->get_urls_from_html( $row->event_desc );
 				$eventurls = array_merge( $eventurls, $urls);
 			}
-			if ( !empty($row[1]) ) { // event_short
-				$urls = $wpmc->get_urls_from_html( $row[1] );
+			if ( !empty($row->event_short) ) {
+				$urls = $wpmc->get_urls_from_html( $row->event_short );
 				$eventurls = array_merge( $eventurls, $urls);
 			}
-			if ( !empty($row[2]) ) { // event_link
-				array_push( $eventurls, $wpmc->clean_url( $row[2] ) );
+			if ( !empty($row->event_link) ) {
+				array_push( $eventurls, $wpmc->clean_url( $row->event_link ) );
 			}
-			if ( !empty($row[3]) ) { // event_url
-				array_push( $eventurls, $wpmc->clean_url( $row[3] ) );
+			if ( !empty($row->event_url) ) {
+				array_push( $eventurls, $wpmc->clean_url( $row->event_url ) );
 			}
-			if ( !empty($row[4]) ) { // event_image
-				array_push( $eventurls, $wpmc->clean_url( $row[4] ) );
+			if ( !empty($row->event_image) ) {
+				array_push( $eventurls, $wpmc->clean_url( $row->event_image ) );
 			}
-
 		}
-	}
-
-	if ( !empty( $eventurls ) ) {
-		$wpmc->add_reference_url( $eventurls, 'CALENDAR (URL)' );
-	}
+		if ( !empty( $eventurls ) ) $wpmc->add_reference_url( $eventurls, 'CALENDAR (URL)' );
+	}, 100, function( $rows, $cursor ) {
+		$last = end( $rows );
+		return $last ? (int) $last->event_id : $cursor;
+	} );
 }
 
 ?>
