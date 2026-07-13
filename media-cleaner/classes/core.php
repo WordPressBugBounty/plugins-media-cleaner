@@ -2609,17 +2609,21 @@ class Meow_WPMC_Core {
 			return null;
 		}
 		$url = html_entity_decode( $url, ENT_QUOTES, 'UTF-8' );
-		$url_host = (string) wp_parse_url( $url, PHP_URL_HOST );
-		$uploads_host = (string) wp_parse_url( $this->upload_url, PHP_URL_HOST );
-		if ( $url_host !== '' && strcasecmp( $url_host, $uploads_host ) !== 0 ) {
-			return null;
-		}
 		$base_path = (string) wp_parse_url( $this->upload_url, PHP_URL_PATH );
 		$url_path = (string) wp_parse_url( $url, PHP_URL_PATH );
-		if ( $url_path === '' || $base_path === '' || strpos( $url_path, trailingslashit( $base_path ) ) !== 0 ) {
+		if ( $url_path === '' || $base_path === '' ) {
 			return null;
 		}
-		$relative = ltrim( substr( $url_path, strlen( $base_path ) ), '/' );
+		// The host is deliberately not compared: content routinely references the
+		// uploads directory through www/non-www variants, CDN aliases, or image
+		// proxies, and a missed reference is far more dangerous than an extra one.
+		// The uploads path is matched anywhere so proxy prefixes also resolve.
+		$marker = trailingslashit( $base_path );
+		$position = strpos( $url_path, $marker );
+		if ( $position === false ) {
+			return null;
+		}
+		$relative = substr( $url_path, $position + strlen( $marker ) );
 		$normalized = $this->normalize_upload_relative_path( urldecode( $relative ) );
 		return is_wp_error( $normalized ) ? null : $normalized;
 	}
@@ -3117,7 +3121,7 @@ class Meow_WPMC_Core {
 			'uploads_file_buffer' => 500,
 			'delay' => 100,
 			'refs_buffer' => 500,
-			'shortcodes_disabled' => true,
+			'shortcodes_disabled' => false,
 
 			'output_buffer_cleaning_disabled' => false,
 			'php_error_logs' => false,
@@ -3441,9 +3445,13 @@ function wpmc_install() {
 	if ( $runs->tables_exist( true ) ) {
 		if ( $previous_schema < 2 ) {
 			delete_transient( 'wpmc_progress' );
+		}
+		// Schema 2 to 4 force-disabled shortcode analysis, which caused false
+		// positives for rendered shortcodes (Foo Gallery and others). Undo it once.
+		if ( $previous_schema >= 2 && $previous_schema < 5 ) {
 			$options = get_option( 'wpmc_options', array() );
-			if ( is_array( $options ) ) {
-				$options['shortcodes_disabled'] = true;
+			if ( is_array( $options ) && !empty( $options['shortcodes_disabled'] ) ) {
+				$options['shortcodes_disabled'] = false;
 				update_option( 'wpmc_options', $options, false );
 			}
 		}

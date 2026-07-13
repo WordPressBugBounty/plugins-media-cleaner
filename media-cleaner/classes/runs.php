@@ -2,7 +2,7 @@
 
 class Meow_WPMC_Runs {
 
-	const SCHEMA_VERSION = 4;
+	const SCHEMA_VERSION = 5;
 	const LOCK_OPTION = 'wpmc_scan_lock';
 	const ACTIVE_RUN_OPTION = 'wpmc_active_run_id';
 	const SCHEMA_OPTION = 'wpmc_schema_version';
@@ -33,9 +33,15 @@ class Meow_WPMC_Runs {
 			if ( !$this->tables_exist( true ) ) return false;
 			if ( $version < 2 ) {
 				delete_transient( 'wpmc_progress' );
+			}
+			// Schema 2 to 4 force-disabled shortcode analysis on upgrade, which silently
+			// removed references produced by rendered shortcodes (Foo Gallery and others)
+			// and caused false positives. Undo that overwrite once; users who prefer it
+			// disabled can turn it off again in the settings.
+			if ( $version >= 2 && $version < 5 ) {
 				$options = get_option( 'wpmc_options', array() );
-				if ( is_array( $options ) ) {
-					$options['shortcodes_disabled'] = true;
+				if ( is_array( $options ) && !empty( $options['shortcodes_disabled'] ) ) {
+					$options['shortcodes_disabled'] = false;
 					update_option( 'wpmc_options', $options, false );
 				}
 			}
