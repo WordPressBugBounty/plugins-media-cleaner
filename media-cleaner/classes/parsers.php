@@ -6,6 +6,9 @@ class Meow_WPMC_Parsers {
 		// require_once( ABSPATH . 'wp-admin/includes/plugin.php' );   // mm change
 		require_once( 'parsers/common.php' );
 
+		if ( function_exists( 'parse_blocks' ) )
+			require_once( 'parsers/blocks.php' );
+
 		if ( class_exists( 'WooCommerce' ) )
 			require_once( 'parsers/woocommerce.php' );
 

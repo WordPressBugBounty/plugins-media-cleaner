@@ -289,7 +289,7 @@ class Meow_WPMC_Support {
     }
 
     //WP Recipe Maker
-    if ( defined( 'WPINC' ) ) {
+    if ( defined( 'WPRM_VERSION' ) || class_exists( 'WP_Recipe_Maker' ) ) {
       array_push( $unsupported, 'WP Recipe Maker' );
     }
 

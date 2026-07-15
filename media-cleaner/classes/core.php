@@ -91,9 +91,13 @@ class Meow_WPMC_Core {
 		
 		// Check if this is a REST request specifically for Media Cleaner
 		$is_wpmc_rest = false;
+		$is_mcp_rest = false;
 		if ( MeowKit_WPMC_Helpers::is_rest() ) {
 			$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : '';
 			$is_wpmc_rest = strpos( $request_uri, '/media-cleaner/v1' ) !== false;
+			// MCP tools are served by AI Engine, on its own route. The scan engine
+			// still has to be loaded for them to run.
+			$is_mcp_rest = strpos( $request_uri, '/mcp/v1' ) !== false;
 		}
 
 		// Variables
@@ -114,20 +118,20 @@ class Meow_WPMC_Core {
 		global $wpmc;
 		$wpmc = $this;
 
-		$shouldLoad = ( defined( 'WP_CLI' ) && WP_CLI ) || $is_wpmc_screen || $is_wpmc_rest;
+		$shouldLoad = ( defined( 'WP_CLI' ) && WP_CLI ) || $is_wpmc_screen || $is_wpmc_rest || $is_mcp_rest;
 
 		if ( ! $shouldLoad ) {
 			return;
 		}
 
 		$this->runs = new Meow_WPMC_Runs( $this );
-		if ( $this->is_rest || $this->is_cli ) $this->runs->maybe_upgrade();
+		if ( $this->is_rest || $this->is_cli || $is_mcp_rest ) $this->runs->maybe_upgrade();
 
 		// Language
 		load_plugin_textdomain( WPMC_DOMAIN, false, basename( WPMC_PATH ) . '/languages' );
 
 		// Install hooks and engine only if they might be used
-		if ( is_admin() || $this->is_rest || $this->is_cli ) {
+		if ( is_admin() || $this->is_rest || $this->is_cli || $is_mcp_rest ) {
 			add_action( 'wpmc_initialize_parsers', array( $this, 'initialize_parsers' ), 10, 0 );
 			add_filter( 'wp_unique_filename', array( $this, 'wp_unique_filename' ), 10, 3 );
 			$this->engine = new Meow_WPMC_Engine( $this, $this->admin );
@@ -136,6 +140,11 @@ class Meow_WPMC_Core {
 		// Only for REST
 		if ( $this->is_rest ) {
 			new Meow_WPMC_Rest( $this, $this->admin );
+		}
+
+		// MCP tools, served through AI Engine.
+		if ( class_exists( 'Meow_MWAI_Core' ) || isset( $GLOBALS['mwai'] ) ) {
+			new Meow_WPMC_MCP( $this );
 		}
 
 		
@@ -3129,6 +3138,7 @@ class Meow_WPMC_Core {
 			'clean_uninstall' => false,
 			'repair_mode' => false,
 			'expert_mode' => false,
+			'mcp_support' => false,
 			'logs_path' => null,
 			'thumbnail_force_issues' => [],
 		);
@@ -3200,6 +3210,7 @@ class Meow_WPMC_Core {
 			'images_only', 'attach_is_use', 'thumbnails_only', 'hide_thumbnails', 'hide_warning',
 			'skip_trash', 'shortcodes_disabled', 'output_buffer_cleaning_disabled',
 			'php_error_logs', 'clean_uninstall', 'repair_mode', 'expert_mode',
+			'mcp_support',
 		);
 		if ( in_array( $name, $boolean_options, true ) ) {
 			return rest_sanitize_boolean( $value );
@@ -3262,6 +3273,8 @@ class Meow_WPMC_Core {
 		// Runtime information is not persisted with settings. In particular, scan
 		// checkpoints must never be copied into the options row.
 		$options['thumbnail_sizes'] = $this->get_thumbnail_sizes();
+		global $mwai;
+		$options['mwai_has_mcp'] = !empty( $mwai ) && method_exists( $mwai, 'hasMCP' ) && $mwai->hasMCP();
 
 		return $options;
 	}

@@ -1355,28 +1355,31 @@ class Meow_WPMC_Rest
 	
 		$total = $this->count_references($search, $referenceFilter);
 	
-		$where_sql = $wpdb->prepare( 'AND run_id = %d', $run_id );
+		// Every column is qualified with the r alias. Searching joins the posts table,
+		// and an unqualified id exists on both sides, which makes the query ambiguous
+		// and returns no reference at all.
+		$where_sql = $wpdb->prepare( 'AND r.run_id = %d', $run_id );
 		if ($referenceFilter === 'mediaIds') {
-			$where_sql .= ' AND mediaId IS NOT NULL';
+			$where_sql .= ' AND r.mediaId IS NOT NULL';
 		} else if ($referenceFilter === 'mediaUrls') {
-			$where_sql .= ' AND mediaUrl IS NOT NULL';
+			$where_sql .= ' AND r.mediaUrl IS NOT NULL';
 		}
-	
-		$order_sql = 'ORDER BY id DESC';
+
+		$order_sql = 'ORDER BY r.id DESC';
 		if ( $orderBy === 'id' ) {
-			$order_sql = 'ORDER BY ID IS NULL, ID ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
+			$order_sql = 'ORDER BY r.id IS NULL, r.id ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
 		} elseif ( $orderBy === 'mediaId' ) {
-			$order_sql = 'ORDER BY mediaId IS NULL, mediaId ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
+			$order_sql = 'ORDER BY r.mediaId IS NULL, r.mediaId ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
 		} elseif ( $orderBy === 'mediaUrl' ) {
-			$order_sql = 'ORDER BY mediaUrl IS NULL, mediaUrl ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
+			$order_sql = 'ORDER BY r.mediaUrl IS NULL, r.mediaUrl ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
 		} elseif ( $orderBy === 'originType' ) {
-			$order_sql = 'ORDER BY originType ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
+			$order_sql = 'ORDER BY r.originType ' . ( $order === 'asc' ? 'ASC' : 'DESC' );
 		}
-	
+
 		if ( empty( $search ) ) {
-			$entries = $wpdb->get_results( 
-				$wpdb->prepare( "SELECT *
-					FROM $table_ref
+			$entries = $wpdb->get_results(
+				$wpdb->prepare( "SELECT r.*
+					FROM $table_ref r
 					WHERE 1=1
 					$where_sql
 					$order_sql
@@ -1385,18 +1388,19 @@ class Meow_WPMC_Rest
 			);
 		} else {
 			$posts_table = $wpdb->posts;
-			$entries = $wpdb->get_results( 
+			$search_like = '%' . $wpdb->esc_like( $search ) . '%';
+			$entries = $wpdb->get_results(
 				$wpdb->prepare( "SELECT r.*
 					FROM $table_ref r
 					LEFT JOIN $posts_table p ON r.origin = p.ID
-					WHERE (r.mediaId LIKE '%1\$s'
-					OR r.mediaUrl LIKE '%1\$s'
-					OR r.originType LIKE '%1\$s'
-					OR r.origin LIKE '%1\$s'
-					OR p.post_title LIKE '%1\$s')
+					WHERE (r.mediaId LIKE %s
+					OR r.mediaUrl LIKE %s
+					OR r.originType LIKE %s
+					OR r.origin LIKE %s
+					OR p.post_title LIKE %s)
 					$where_sql
 					$order_sql
-					LIMIT %2\$d, %3\$d", ( '%' . $search . '%' ), $skip, $limit
+					LIMIT %d, %d", $search_like, $search_like, $search_like, $search_like, $search_like, $skip, $limit
 				)
 			);
 		}
@@ -1428,32 +1432,57 @@ class Meow_WPMC_Rest
 		$media_ids = array_unique( $media_ids );
 		$media_urls = array_unique( $media_urls );
 	
-		// Get post titles
+		// Get post titles. get_posts() would silently drop the post types excluded
+		// from search (many builders and galleries use such types) and anything not
+		// published, so the posts are read directly instead.
 		$post_titles = [];
 		if ( !empty( $post_ids ) ) {
-			$posts = get_posts( array(
-				'include'     => $post_ids,
-				'post_type'   => 'any',
-				'numberposts' => -1,
-			) );
-			foreach ( $posts as $post ) {
-				$post_titles[ $post->ID ] = $post->post_title;
+			_prime_post_caches( $post_ids, false, false );
+			foreach ( $post_ids as $post_id ) {
+				$post = get_post( $post_id );
+				if ( $post ) {
+					$post_titles[ $post->ID ] = $post->post_title;
+				}
 			}
 		}
 	
-		// Get thumbnails for media IDs
+		// Get thumbnails and titles for media IDs
 		$media_thumbnails = [];
+		$media_titles = [];
+		if ( !empty( $media_ids ) ) {
+			_prime_post_caches( $media_ids, false, true );
+		}
 		foreach ( $media_ids as $media_id ) {
 			$media = wp_get_attachment_image_src( $media_id, 'thumbnail' );
 			if ( $media ) {
 				$media_thumbnails[ $media_id ] = $media[0];
 			}
+			$media_post = get_post( $media_id );
+			if ( $media_post ) {
+				$media_titles[ $media_id ] = $media_post->post_title;
+			}
 		}
 	
-		// Map media URLs to attachment IDs and get thumbnails
+		// Get the uploads directory URL
+		$upload_dir = wp_upload_dir();
+		$upload_baseurl = $upload_dir['baseurl'];
+
+		// Map media URLs to attachment IDs and get thumbnails. The references store a
+		// path relative to the uploads folder, so it has to be made absolute first,
+		// otherwise nothing is ever resolved and the full size image ends up being
+		// used as a thumbnail. A resolution suffix is dropped to find the original.
 		$media_url_to_id = [];
 		foreach ( $media_urls as $media_url ) {
-			$attachment_id = attachment_url_to_postid( $media_url );
+			$absolute = strpos( $media_url, 'http' ) === 0
+				? $media_url
+				: trailingslashit( $upload_baseurl ) . ltrim( $media_url, '/' );
+			$attachment_id = attachment_url_to_postid( $absolute );
+			if ( !$attachment_id ) {
+				$original = preg_replace( '/-\d+x\d+(\.[A-Za-z0-9]+)$/', '$1', $absolute );
+				if ( $original !== $absolute ) {
+					$attachment_id = attachment_url_to_postid( $original );
+				}
+			}
 			if ( $attachment_id ) {
 				$media_url_to_id[ $media_url ] = $attachment_id;
 				$media = wp_get_attachment_image_src( $attachment_id, 'thumbnail' );
@@ -1462,10 +1491,6 @@ class Meow_WPMC_Rest
 				}
 			}
 		}
-	
-		// Get the uploads directory URL
-		$upload_dir = wp_upload_dir();
-		$upload_baseurl = $upload_dir['baseurl'];
 	
 		// Assign post titles and thumbnails to entries
 		foreach ( $entries as $entry ) {
@@ -1477,6 +1502,13 @@ class Meow_WPMC_Rest
 			}
 		
 	
+			// Assign the media title, so a reference by ID is readable without
+			// having to open the media.
+			$entry->media_title = isset( $entry->mediaId ) && isset( $media_titles[ $entry->mediaId ] )
+				? $media_titles[ $entry->mediaId ]
+				: '';
+			$entry->media_exists = !$entry->mediaId || isset( $media_titles[ $entry->mediaId ] );
+
 			// Assign thumbnail
 			$entry->thumbnail = '';
 	
@@ -1810,22 +1842,29 @@ class Meow_WPMC_Rest
 		$table_ref = $wpdb->prefix . "mclean_refs";
 		$run_id = $this->core->get_run_id();
 		$posts_table = $wpdb->posts;
-		$where_sqls = [];
-		$join_sql = '';
-		if (! empty($search) ) {
-			$search_like = '%' . $wpdb->esc_like( $search ) . '%';
-			$where_sqls[] = $wpdb->prepare("AND (r.mediaId LIKE '%1\$s' OR r.mediaUrl LIKE '%1\$s' OR r.originType LIKE '%1\$s' OR r.origin LIKE '%1\$s' OR p.post_title LIKE '%1\$s')", $search_like);
-			$join_sql = "LEFT JOIN $posts_table p ON r.origin = p.ID";
+		$filter_sql = '';
+		if ($referenceFilter === 'mediaIds') {
+			$filter_sql = ' AND r.mediaId IS NOT NULL';
+		} else if ($referenceFilter === 'mediaUrls') {
+			$filter_sql = ' AND r.mediaUrl IS NOT NULL';
 		}
-		if ( $referenceFilter !== 'showAll' ) {
-			if ($referenceFilter === 'mediaIds') {
-				$where_sqls[] = 'AND r.mediaId IS NOT NULL';
-			} else if ($referenceFilter === 'mediaUrls') {
-				$where_sqls[] = 'AND r.mediaUrl IS NOT NULL';
-			}
+		// The whole statement is prepared once: feeding an already prepared clause
+		// back into prepare() would treat the escaped search value as placeholders.
+		if ( empty( $search ) ) {
+			return (int)$wpdb->get_var( $wpdb->prepare(
+				"SELECT COUNT(r.id) FROM $table_ref r WHERE r.run_id = %d $filter_sql",
+				$run_id
+			) );
 		}
-		$where_sql = implode(' ', $where_sqls);
-		return (int)$wpdb->get_var( $wpdb->prepare( "SELECT COUNT(r.id) FROM $table_ref r $join_sql WHERE r.run_id = %d $where_sql", $run_id ) );
+		$search_like = '%' . $wpdb->esc_like( $search ) . '%';
+		return (int)$wpdb->get_var( $wpdb->prepare(
+			"SELECT COUNT(r.id) FROM $table_ref r
+			LEFT JOIN $posts_table p ON r.origin = p.ID
+			WHERE r.run_id = %d $filter_sql
+			AND (r.mediaId LIKE %s OR r.mediaUrl LIKE %s OR r.originType LIKE %s
+			OR r.origin LIKE %s OR p.post_title LIKE %s)",
+			$run_id, $search_like, $search_like, $search_like, $search_like, $search_like
+		) );
 	}
 
 	function rest_get_stats( $request ) {

@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 7.2.1
+Stable tag: 7.2.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -22,6 +22,10 @@ Media Cleaner is like a ninja assassin for your Media Library - it'll stealthily
 To learn more about compatibility, features, and the Pro version, check out the [tutorial](https://meowapps.com/media-cleaner/tutorial/) on the [official website](https://meowapps.com/media-cleaner/).
 
 [youtube https://www.youtube.com/watch?v=qmDSgWZWnSw]
+
+=== AI ASSISTANTS (MCP) ===
+
+Media Cleaner can be driven by an AI assistant, through the MCP server of [AI Engine](https://wordpress.org/plugins/ai-engine/). Enable MCP in the Media Cleaner settings, and your assistant (Claude, ChatGPT, and the others) is able to run a scan, read the results, explain why a media was reported, ignore the false positives, and clean up. It is not a black box: the tools tell the assistant which builders and plugins are supported on your site, which ones are not, and what the scan cannot see, so it can warn you and check the doubtful cases instead of trusting the results blindly. Deleted files still go to the trash, and a permanent deletion always requires your explicit confirmation.
 
 === COMPATIBILITY ===
 
@@ -48,6 +52,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.2 (2026/07/15) =
+* Add: MCP tools so an AI assistant can scan, review and clean up through AI Engine
+* Add: Parser for background images stored in core block attributes
+* Update: Reworked the references view into four meaningful columns with media titles, missing media markers, and fixed post titles and thumbnails
+* Fix: References search returning no results because of an ambiguous column in the query
+* Update: Replaced the browser broken image icon with a placeholder when a thumbnail cannot be loaded
 
 = 7.2.1 (2026/07/13) =
 * Fix: Hotfix — Restored shortcode analysis and lenient upload URL matching to fix false positives introduced in 7.2.0.
