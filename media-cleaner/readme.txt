@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 7.2.2
+Stable tag: 7.2.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,16 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.3 (2026/07/16) =
+* Fix: Trash recovery no longer requires a scan — recovered files are always available regardless of scan state.
+* Add: Dashboard now shows a cleanup status message explaining when a fresh scan is needed.
+* Update: Trash buttons are hidden while a scan is staged, preventing actions the server would refuse.
+* Fix: Background images set in the Site Editor are now detected during scans.
+* Fix: Hotfix — Results created before the scan-runs system are now properly adopted on update and reactivation, restoring cleanup and trash previews.
+* Fix: MCP trashing no longer deletes files when the trash setting is skipped, and no longer reports unsaved progress.
+* Update: Trash previews are now restricted to raster images.
+* Update: Deleting results from an older scanner version now requires a fresh scan first.
 
 = 7.2.2 (2026/07/15) =
 * Add: MCP tools so an AI assistant can scan, review and clean up through AI Engine

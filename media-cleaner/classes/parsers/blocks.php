@@ -13,18 +13,28 @@ add_action( 'wpmc_scan_post', 'wpmc_scan_post_blocks', 10, 2 );
 function wpmc_scan_post_blocks( $html, $id ) {
 	global $wpmc;
 
-	if ( empty( $html ) || !is_string( $html ) || strpos( $html, '<!-- wp:' ) === false ) {
-		return;
-	}
-
-	$blocks = parse_blocks( $html );
-	if ( !is_array( $blocks ) ) {
+	if ( empty( $html ) || !is_string( $html ) ) {
 		return;
 	}
 
 	$ids = array();
 	$urls = array();
-	wpmc_scan_blocks_recursively( $blocks, $ids, $urls );
+
+	if ( strpos( $html, '<!-- wp:' ) !== false ) {
+		$blocks = parse_blocks( $html );
+		if ( is_array( $blocks ) ) {
+			wpmc_scan_blocks_recursively( $blocks, $ids, $urls );
+		}
+	}
+	else if ( get_post_type( $id ) === 'wp_global_styles' ) {
+		// The site-wide background set in the Site Editor is kept here as plain JSON,
+		// with no block markup at all, so nothing above ever sees it. The attributes
+		// are shaped the same, so the same walk finds it.
+		$styles = json_decode( $html, true );
+		if ( is_array( $styles ) ) {
+			wpmc_scan_block_attributes( $styles, $ids, $urls );
+		}
+	}
 
 	if ( !empty( $ids ) ) {
 		$wpmc->add_reference_id( array_values( array_unique( $ids ) ), 'Block Background (ID)', $id );

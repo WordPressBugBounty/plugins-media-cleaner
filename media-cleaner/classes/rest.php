@@ -201,6 +201,12 @@ class Meow_WPMC_Rest
 					'callback' => array( $this, 'rest_run_cancel' )
 				) );
 
+				register_rest_route( $this->namespace, '/trash_preview', array(
+					'methods' => 'GET',
+					'permission_callback' => array( $this->core, 'can_access_features' ),
+					'callback' => array( $this, 'rest_trash_preview' )
+				) );
+
 			// LOGS
 			register_rest_route( $this->namespace, '/refresh_logs', array(
 				'methods' => 'POST',
@@ -467,7 +473,12 @@ class Meow_WPMC_Rest
 			return $this->error_response( $run, $run_id, 'complete' );
 		}
 		$this->core->clear_run_context();
-		return new WP_REST_Response( array( 'success' => true, 'data' => array( 'run' => $this->core->runs->to_array( $run ), 'cleanup_allowed' => true ) ), 200 );
+		// Asked rather than assumed: a scan started by an older version can still be
+		// resumed and published here, and its results are not the current one's.
+		return new WP_REST_Response( array( 'success' => true, 'data' => array(
+			'run' => $this->core->runs->to_array( $run ),
+			'cleanup_allowed' => $this->core->runs->cleanup_allowed(),
+		) ), 200 );
 	}
 
 	function rest_run_fail( $request ) {
@@ -1260,6 +1271,74 @@ class Meow_WPMC_Rest
 		}
 	}
 
+	/**
+	 * Streams the preview of a trashed item. The trash is private storage with no
+	 * public URL, so the file is served here, and only if it really is an image
+	 * sitting inside the trash.
+	 */
+	function rest_trash_preview( $request ) {
+		$id = (int) $request->get_param( 'id' );
+		$issue = $this->core->get_issue( $id );
+		if ( !$issue || (int) $issue->deleted !== 1 ) {
+			return new WP_Error( 'wpmc_preview_not_found', __( 'This trashed item does not exist.', 'media-cleaner' ), array( 'status' => 404 ) );
+		}
+
+		$path = $this->trash_preview_path( $issue );
+		if ( !$path ) {
+			return new WP_Error( 'wpmc_preview_unavailable', __( 'This item cannot be previewed.', 'media-cleaner' ), array( 'status' => 404 ) );
+		}
+		$resolved = $this->core->resolve_trash_path( $path, true );
+		if ( is_wp_error( $resolved ) || !is_file( $resolved ) || is_link( $resolved ) ) {
+			return new WP_Error( 'wpmc_preview_unavailable', __( 'This item cannot be previewed.', 'media-cleaner' ), array( 'status' => 404 ) );
+		}
+
+		// Raster formats only, and never anything derived from the extension alone.
+		// SVG is an image that can carry scripts: served inline from here, opening one
+		// directly would run it under the site's own origin.
+		$filetype = wp_check_filetype( basename( $resolved ) );
+		$mime = isset( $filetype['type'] ) ? $filetype['type'] : '';
+		$previewable = apply_filters( 'wpmc_previewable_trash_mimes', array(
+			'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp',
+		) );
+		if ( !in_array( (string) $mime, (array) $previewable, true ) ) {
+			return new WP_Error( 'wpmc_preview_not_an_image', __( 'Only images can be previewed.', 'media-cleaner' ), array( 'status' => 415 ) );
+		}
+		$size = (int) @filesize( $resolved );
+		$limit = (int) apply_filters( 'wpmc_max_trash_preview_bytes', 8 * 1024 * 1024 );
+		if ( $size < 1 || $size > $limit ) {
+			return new WP_Error( 'wpmc_preview_too_large', __( 'This image is too large to be previewed.', 'media-cleaner' ), array( 'status' => 413 ) );
+		}
+
+		$this->core->clean_ob();
+		header( 'Content-Type: ' . $mime );
+		header( 'Content-Length: ' . $size );
+		header( 'X-Content-Type-Options: nosniff' );
+		header( 'Content-Disposition: inline; filename="' . basename( $resolved ) . '"' );
+		header( 'Cache-Control: private, max-age=300' );
+		readfile( $resolved );
+		exit;
+	}
+
+	/**
+	 * The smallest file of a trashed item, so previewing never streams a huge
+	 * original when a thumbnail was trashed along with it.
+	 */
+	private function trash_preview_path( $issue ) {
+		if ( (int) $issue->type === 1 && $issue->postId ) {
+			$meta = wp_get_attachment_metadata( $issue->postId );
+			$main = $this->core->clean_uploaded_filename( get_attached_file( $issue->postId ) );
+			if ( !empty( $meta['sizes']['thumbnail']['file'] ) && $main !== '' ) {
+				$directory = dirname( $main );
+				$directory = $directory === '.' ? '' : trailingslashit( $directory );
+				return $directory . $meta['sizes']['thumbnail']['file'];
+			}
+			return $main !== '' ? $main : null;
+		}
+		// Filesystem items keep the display suffix, e.g. "file.jpg (+ 3 files)".
+		$path = preg_replace( '/\s\(\+.*$/', '', (string) $issue->path );
+		return $path !== '' ? $path : null;
+	}
+
 	function rest_refresh_logs() {
 		return new WP_REST_Response( [ 'success' => true, 'data' => $this->core->get_logs() ], 200 );
 	}
@@ -1592,8 +1671,14 @@ class Meow_WPMC_Rest
 		$base = $this->core->upload_url;
 		foreach ( $entries as $entry ) {
 			if ( $is_trash ) {
-				$entry->thumbnail_url = null;
-				$entry->image_url = null;
+				// The trash lives outside the uploads folder, so it has no public URL.
+				// The preview is streamed by the plugin instead of being linked.
+				$preview = add_query_arg( array(
+					'id' => (int) $entry->id,
+					'_wpnonce' => wp_create_nonce( 'wp_rest' ),
+				), rest_url( $this->namespace . '/trash_preview' ) );
+				$entry->thumbnail_url = $preview;
+				$entry->image_url = $preview;
 				if ( $entry->type != 0 ) {
 					$entry->title = html_entity_decode( get_the_title( $entry->postId ) );
 				}
@@ -1630,15 +1715,10 @@ class Meow_WPMC_Rest
 		return new WP_REST_Response( [ 'success' => true, 'data' => $entries, 'total' => $total ], 200 );
 	}
 
+	// Nothing here waits for a scan. Only trashing something new does, and delete()
+	// refuses that on its own. Recovering, emptying the trash and ignoring are the
+	// user acting on decisions they already made.
 	private function perform_item_operations( $request, $operation, $callback ) {
-		if ( !$this->core->can_cleanup() ) {
-			return $this->error_response( new WP_Error(
-				'wpmc_cleanup_locked',
-				__( 'Cleanup is available only for the last completed scan and while no other scan is running.', 'media-cleaner' ),
-				array( 'status' => 409 )
-			) );
-		}
-
 		$params = $this->request_json( $request );
 		$ids = isset( $params['entryIds'] ) ? (array) $params['entryIds'] : array();
 		if ( isset( $params['entryId'] ) ) {
@@ -1766,10 +1846,8 @@ class Meow_WPMC_Rest
 		return $this->perform_item_operations( $request, 'delete', array( $this->core, 'delete' ) );
 	}
 
+	// Emptying the trash needs no scan: those files were set aside on purpose.
 	function rest_force_trash_all( $request ) {
-		if ( !$this->core->can_cleanup() ) {
-			return $this->error_response( new WP_Error( 'wpmc_cleanup_locked', __( 'Trash can be emptied only for a completed scan while no scan is running.', 'media-cleaner' ), array( 'status' => 409 ) ) );
-		}
 		$params = $this->request_json( $request );
 		$initialize = isset( $params['initialize'] ) ? rest_sanitize_boolean( $params['initialize'] ) : true;
 		$res = $this->core->force_trash( $initialize, 100 );

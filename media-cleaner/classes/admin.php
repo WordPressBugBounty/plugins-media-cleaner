@@ -57,6 +57,7 @@ class Meow_WPMC_Admin extends MeowKit_WPMC_Admin {
       'is_registered' => !!$this->is_registered(),
       'rest_nonce' => wp_create_nonce( 'wp_rest' ),
       'cleanup_allowed' => $this->core->runs ? $this->core->runs->cleanup_allowed() : false,
+      'cleanup_status' => $this->core->runs ? $this->core->runs->cleanup_status() : null,
 			'schema_ready' => $this->core->runs ? $this->core->runs->tables_exist() : false,
       'options' => $options
     ] );

@@ -322,9 +322,11 @@ class Meow_WPMC_MCP {
 		$cleanup_allowed = $this->core->can_cleanup();
 		$cleanup_blocked_because = null;
 		if ( !$cleanup_allowed ) {
+			// Only trashing waits for this. Recovering, emptying the trash and ignoring
+			// always work, so the reason says what is actually refused.
 			$cleanup_blocked_because = $resumable
-				? 'A scan is staged or paused. Publish it with wpmc_scan_publish, or cancel it with wpmc_scan_cancel.'
-				: 'No completed scan is published yet. Run a scan first.';
+				? 'A scan is staged or paused, so wpmc_trash is refused. Publish it with wpmc_scan_publish, or cancel it with wpmc_scan_cancel. Recovering and emptying the trash still work.'
+				: 'No completed scan from this version of Media Cleaner is published, so wpmc_trash is refused. Run one with wpmc_scan_start. Recovering and emptying the trash still work.';
 		}
 
 		return array(
@@ -414,7 +416,11 @@ class Meow_WPMC_MCP {
 			return array( 'success' => false, 'error' => $context->get_error_message() );
 		}
 		$scan_type = $this->get_scan_steps( $method, $config );
-		$runs->checkpoint( $run->id, 'ready', array( 'mcp_steps' => $scan_type, 'mcp_index' => 0 ) );
+		$runs->checkpoint( $run->id, 'ready', null, array( 'mcp' => array(
+			'steps' => $scan_type,
+			'index' => 0,
+			'offset' => 0,
+		) ) );
 
 		$warnings = array( self::SAFETY_NOTE );
 		if ( empty( $config['content'] ) ) {
@@ -456,19 +462,35 @@ class Meow_WPMC_MCP {
 		return $steps;
 	}
 
+	private function read_cursor( $run ) {
+		$counters = json_decode( (string) $run->counters, true );
+		$cursor = is_array( $counters ) && isset( $counters['mcp'] ) && is_array( $counters['mcp'] )
+			? $counters['mcp'] : array();
+		return array(
+			'steps' => isset( $cursor['steps'] ) && is_array( $cursor['steps'] ) ? $cursor['steps'] : null,
+			'index' => isset( $cursor['index'] ) ? (int) $cursor['index'] : 0,
+			'offset' => isset( $cursor['offset'] ) ? (int) $cursor['offset'] : 0,
+		);
+	}
+
 	private function tool_scan_step( $args ) {
 		$run_id = isset( $args['run_id'] ) ? (int) $args['run_id'] : 0;
 		$run = $this->core->set_run_context( $run_id );
 		if ( is_wp_error( $run ) ) {
 			return array( 'success' => false, 'error' => $run->get_error_message() );
 		}
-		$checkpoint = json_decode( (string) $run->checkpoint, true );
-		$checkpoint = is_array( $checkpoint ) ? $checkpoint : array();
-		$steps = isset( $checkpoint['mcp_steps'] ) && is_array( $checkpoint['mcp_steps'] )
-			? $checkpoint['mcp_steps']
+		// The cursor lives in the counters, not in the checkpoint. The engines write the
+		// checkpoint themselves during a step, replacing whatever was there, so a cursor
+		// kept in it would be erased mid-step: if the request then died, the next call
+		// would read no cursor, start again from step zero and reset the references it
+		// had already collected, while the work journals still counted as done. The
+		// counters are merged instead of replaced, so both can write freely.
+		$cursor = $this->read_cursor( $run );
+		$steps = is_array( $cursor['steps'] ) && $cursor['steps']
+			? $cursor['steps']
 			: $this->get_scan_steps( $run->method, json_decode( (string) $run->config, true ) ?: array() );
-		$index = isset( $checkpoint['mcp_index'] ) ? (int) $checkpoint['mcp_index'] : 0;
-		$offset = isset( $checkpoint['mcp_offset'] ) ? (int) $checkpoint['mcp_offset'] : 0;
+		$index = (int) $cursor['index'];
+		$offset = (int) $cursor['offset'];
 
 		if ( $index >= count( $steps ) ) {
 			return array(
@@ -523,18 +545,45 @@ class Meow_WPMC_MCP {
 			return array( 'success' => false, 'run_id' => $run_id, 'error' => $e->getMessage(), 'scan_failed' => true );
 		}
 
-		$next_offset = $step_finished ? 0 : $offset + max( 1, $processed );
+		// The engines check the time limit before handling their first item, so a step
+		// can come back having processed nothing. Advancing the offset here would step
+		// over an item, its references would never be collected, and the media it uses
+		// could later be reported as unused. The offset is kept instead and the step is
+		// retried on a fresh time budget, which is enough to get past it.
+		if ( !$step_finished && $processed < 1 ) {
+			return array(
+				'success' => true,
+				'run_id' => $run_id,
+				'finished' => false,
+				'retry' => true,
+				'step' => $step,
+				'message' => 'The server ran out of time before this step processed anything. Nothing was skipped.',
+				'next_action' => 'Call wpmc_scan_step again with the same run_id.',
+			);
+		}
+
+		$next_offset = $step_finished ? 0 : $offset + $processed;
 		$next_index = $step_finished ? $index + 1 : $index;
 		$finished = $next_index >= count( $steps );
-		$checkpoint['mcp_steps'] = $steps;
-		$checkpoint['mcp_index'] = $next_index;
-		$checkpoint['mcp_offset'] = $next_offset;
 		// The last checkpoint has to carry the phase name the run manager expects for
 		// this method, otherwise the coverage is incomplete and publishing is refused.
 		$phase = $finished ? $this->final_phase( $run->method ) : $step;
-		$saved = $this->core->runs->checkpoint( $run_id, $phase, $checkpoint );
-		if ( is_wp_error( $saved ) ) {
-			return array( 'success' => false, 'error' => $saved->get_error_message() );
+		$counters = array( 'mcp' => array(
+			'steps' => $steps,
+			'index' => $next_index,
+			'offset' => $next_offset,
+		) );
+		// checkpoint() answers false when the database refused the write. Carrying on
+		// would report a step as done, or the scan as finished, while the cursor still
+		// points at the previous position.
+		$saved = $this->core->runs->checkpoint( $run_id, $phase, null, $counters );
+		if ( is_wp_error( $saved ) || $saved === false ) {
+			return array(
+				'success' => false,
+				'run_id' => $run_id,
+				'error' => is_wp_error( $saved ) ? $saved->get_error_message()
+					: 'The scan progress could not be saved, so the scan was stopped instead of reporting progress that was not recorded.',
+			);
 		}
 
 		return array(
@@ -660,10 +709,10 @@ class Meow_WPMC_MCP {
 		$skip = isset( $args['skip'] ) ? max( 0, (int) $args['skip'] ) : 0;
 		$search = isset( $args['search'] ) ? sanitize_text_field( $args['search'] ) : '';
 		$table = $wpdb->prefix . 'mclean_scan';
+		// Run 0 is where the results made before the runs existed live. They are read
+		// like any others: the dashboard shows them, so refusing here would hide a
+		// trash the user still needs to recover.
 		$run_id = $this->core->get_run_id();
-		if ( $run_id < 1 ) {
-			return array( 'success' => false, 'error' => 'No scan has been published yet. Run a scan first.' );
-		}
 		$condition = $filters[ $filter ];
 		$search_sql = $search === '' ? '' : $wpdb->prepare( 'AND path LIKE %s', '%' . $wpdb->esc_like( $search ) . '%' );
 		$total = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $table WHERE run_id = %d AND $condition $search_sql", $run_id ) );
@@ -787,15 +836,8 @@ class Meow_WPMC_MCP {
 		return $ids;
 	}
 
-	private function assert_cleanup_allowed() {
-		if ( !$this->core->can_cleanup() ) {
-			throw new RuntimeException( 'Cleanup is locked: it needs a published scan, and no other scan staged. Check wpmc_get_status.' );
-		}
-	}
-
 	private function tool_ignore( $args ) {
 		$ids = $this->read_entry_ids( $args );
-		$this->assert_cleanup_allowed();
 		$ignore = isset( $args['ignore'] ) ? rest_sanitize_boolean( $args['ignore'] ) : true;
 		$results = array();
 		$done = 0;
@@ -817,11 +859,42 @@ class Meow_WPMC_MCP {
 
 	private function tool_operate( $args, $operation ) {
 		$ids = $this->read_entry_ids( $args );
-		$this->assert_cleanup_allowed();
+		// With Skip Trash on, trashing deletes the file outright. This tool promises
+		// something reversible, so it refuses rather than quietly destroying files.
+		if ( $operation === 'trash' && $this->core->get_option( 'skip_trash' ) ) {
+			throw new RuntimeException( 'Media Cleaner is set to skip the trash, so trashing would delete these files permanently and wpmc_trash will not do that. Use wpmc_delete_permanently if that is really what is wanted, or turn Skip Trash off in the settings.' );
+		}
 		$results = array();
 		$done = 0;
+		$skipped = 0;
 		foreach ( $ids as $id ) {
-			$result = $operation === 'trash' ? $this->core->delete( $id ) : $this->core->recover( $id );
+			// delete() erases an item that is already in the trash, because that is how
+			// the trash is emptied. Trashing must never reach that: a retried call, or an
+			// id that is already trashed, would destroy the file for good while this
+			// reports it as reversible. Both operations are no-ops when there is nothing
+			// to do, so repeating a call is always safe.
+			$issue = $this->core->get_issue( $id );
+			if ( $issue ) {
+				$in_trash = (int) $issue->deleted === 1;
+				if ( ( $operation === 'trash' && $in_trash ) || ( $operation === 'recover' && !$in_trash ) ) {
+					$done++;
+					$skipped++;
+					$results[] = array(
+						'entry_id' => $id,
+						'success' => true,
+						'skipped' => $operation === 'trash' ? 'already_in_trash' : 'not_in_trash',
+						'error' => null,
+					);
+					continue;
+				}
+			}
+			// initial_deleted says "this was not in the trash", which pins delete() to
+			// the quarantine branch. Without it, an overlapping call could trash the row
+			// between the check above and the read inside delete(), and the file would be
+			// erased instead. It fails loudly rather than deleting.
+			$result = $operation === 'trash'
+				? $this->core->delete( $id, array( 'initial_deleted' => false ) )
+				: $this->core->recover( $id );
 			$ok = !is_wp_error( $result ) && $result === true;
 			if ( $ok ) $done++;
 			$results[] = array( 'entry_id' => $id, 'success' => $ok, 'error' => is_wp_error( $result ) ? $result->get_error_message() : null );
@@ -831,6 +904,7 @@ class Meow_WPMC_MCP {
 			'operation' => $operation,
 			'succeeded' => $done,
 			'failed' => count( $ids ) - $done,
+			'skipped' => $skipped,
 			'results' => $results,
 			'reversible' => true,
 			'how_to_undo' => $operation === 'trash'
@@ -849,7 +923,6 @@ class Meow_WPMC_MCP {
 			);
 		}
 		$ids = $this->read_entry_ids( $args );
-		$this->assert_cleanup_allowed();
 		// core->delete() moves an untouched entry to the trash, and erases it when it
 		// is already trashed, so it is called until the entry is really gone. With the
 		// "skip trash" setting the very first call already erases it.

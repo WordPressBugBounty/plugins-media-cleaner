@@ -2,6 +2,10 @@
 
 class Meow_WPMC_Runs {
 
+	// 6 and 7 were used during development and never released, so no site in the wild
+	// carries them. A development site still stamped 6 or 7 is left alone, since it is
+	// only ahead of itself: the next real migration must be 8, or those sites would
+	// skip it.
 	const SCHEMA_VERSION = 5;
 	const LOCK_OPTION = 'wpmc_scan_lock';
 	const ACTIVE_RUN_OPTION = 'wpmc_active_run_id';
@@ -234,7 +238,9 @@ class Meow_WPMC_Runs {
 				'phase' => 'starting',
 				'config' => wp_json_encode( $config ),
 				'checkpoint' => wp_json_encode( array() ),
-				'counters' => wp_json_encode( array() ),
+				// The version that produced these results. checkpoint() merges into this
+				// and complete() leaves it alone, so it is what the published run carries.
+				'counters' => wp_json_encode( array( 'version' => WPMC_VERSION ) ),
 				'errors' => wp_json_encode( array() ),
 				'error_count' => 0,
 				'created_at' => $now,
@@ -314,12 +320,18 @@ class Meow_WPMC_Runs {
 		$phase_name = preg_replace( '/[^A-Za-z0-9_]/', '', (string) $phase );
 		$data = array(
 			'phase' => $phase_name,
-			'checkpoint' => wp_json_encode( $checkpoint ),
 			'counters' => wp_json_encode( $stored_counters ),
 			'updated_at' => current_time( 'mysql', true ),
 			'heartbeat_at' => current_time( 'mysql', true ),
 		);
-		$formats = array( '%s', '%s', '%s', '%s', '%s' );
+		$formats = array( '%s', '%s', '%s', '%s' );
+		// A null checkpoint means "leave it alone". The engines own that column and
+		// write their own resume cursor into it during a step, so a caller that only
+		// has counters to record must not blank it on the way past.
+		if ( $checkpoint !== null ) {
+			$data['checkpoint'] = wp_json_encode( $checkpoint );
+			$formats[] = '%s';
+		}
 
 		$updated = $wpdb->update(
 			$this->table( 'runs' ),
@@ -578,10 +590,47 @@ class Meow_WPMC_Runs {
 		return true;
 	}
 
+	/**
+	 * Whether the published results can be deleted from. They have to come from a
+	 * scan that finished, with no other scan staged over it, and from this version of
+	 * the plugin: each version analyses the site differently, so results made by
+	 * another one are asked to be scanned again rather than trusted.
+	 *
+	 * Results that fail this stay on screen, and their trash stays usable. Only new
+	 * deletions are refused, in delete().
+	 */
 	public function cleanup_allowed() {
-		$active_id = $this->get_active_id();
-		$run = $this->get( $active_id );
-		return $run && $run->status === 'completed' && !$this->get_resumable();
+		$run = $this->get( $this->get_active_id() );
+		if ( !$run || $run->status !== 'completed' || $this->get_resumable() ) {
+			return false;
+		}
+		$counters = json_decode( (string) $run->counters, true );
+		$version = is_array( $counters ) && isset( $counters['version'] ) ? (string) $counters['version'] : '';
+		return $version === WPMC_VERSION;
+	}
+
+	/**
+	 * The same answer as cleanup_allowed(), with the run behind it, so the screen can
+	 * say which scan it is waiting on instead of only that it is waiting.
+	 */
+	public function cleanup_status() {
+		$summary = function( $r ) {
+			if ( !$r ) return null;
+			return array(
+				'id' => (int) $r->id,
+				'method' => $r->method,
+				'status' => $r->status,
+				'created_at' => $r->created_at,
+				'finished_at' => $r->finished_at,
+				'published_at' => $r->published_at,
+			);
+		};
+		return array(
+			// Asked, never re-implemented: two copies of this rule would drift apart.
+			'allowed' => $this->cleanup_allowed(),
+			'run' => $summary( $this->get( $this->get_active_id() ) ),
+			'resumable' => $summary( $this->get_resumable() ),
+		);
 	}
 
 	public function garbage_collect( $limit = 500 ) {
@@ -853,6 +902,7 @@ class Meow_WPMC_Runs {
 			array( '%d' )
 		);
 	}
+
 
 	private function migrate_reference_indexes() {
 		global $wpdb;
