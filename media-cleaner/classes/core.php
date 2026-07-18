@@ -2199,16 +2199,23 @@ class Meow_WPMC_Core {
 	private function add_reference( $id, $url, $type, $origin = null, $extra = null ) {
 		$type = substr( sanitize_text_field( (string) $type ), 0, 191 );
 		if ( $origin !== null && !is_scalar( $origin ) ) $origin = wp_json_encode( $origin );
+		// The origin is only a label for where the reference was found. If malformed content
+		// makes it huge, trim it rather than dropping the reference: the reference marks a file
+		// as used, and losing it could let a used file be deleted.
 		if ( is_string( $origin ) && strlen( $origin ) > 8192 ) {
-			throw new RuntimeException( __( 'A media reference origin exceeds the safe 8 KB limit.', 'media-cleaner' ) );
-		}
-		if ( is_string( $url ) && strlen( $url ) > 4096 ) {
-			throw new RuntimeException( __( 'A media reference exceeds the safe 4 KB path limit.', 'media-cleaner' ) );
+			$origin = substr( $origin, 0, 8192 );
 		}
 		if ( !empty( $id ) ) {
 			$this->queue_reference( array( 'id' => $id, 'url' => null, 'type' => $type, 'origin' => $origin ) );
 		}
 		if ( !empty( $url ) ) {
+			// A real media path is never this large, so an oversized "URL" is a parser
+			// mis-extraction (a data: URI, a concatenated path blob, etc.). It can never match
+			// a real file, so skip it instead of aborting the whole scan — the same treatment
+			// the http/javascript URLs get just below. This is what stranded Divi users in 7.2.
+			if ( is_string( $url ) && strlen( $url ) > 4096 ) {
+				return;
+			}
 			// The URL shouldn't contain http, https, javascript at the beginning (and there are probably many more cases)
 			// The URL must be cleaned before being passed as a reference.
 			if ( substr( $url, 0, 5 ) === "http:" || substr( $url, 0, 6 ) === "https:" || substr( $url, 0, 11 ) === "javascript:" ) {

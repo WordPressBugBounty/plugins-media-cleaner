@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 7.2.3
+Stable tag: 7.2.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,10 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.4 (2026/07/18) =
+* Fix: Stopped a single oversized media reference from aborting the whole scan.
+* Update: Moved the unsupported plugins warning into the free version box as a compact note next to the Pro button.
 
 = 7.2.3 (2026/07/16) =
 * Fix: Trash recovery no longer requires a scan — recovered files are always available regardless of scan state.
