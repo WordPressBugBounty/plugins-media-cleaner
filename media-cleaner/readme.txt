@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 7.2.4
+Stable tag: 7.2.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.5 (2026/07/25) =
+* Fix: Document size validation no longer stops scans, and the size limit is now configurable.
+* Add: Force Clean Trash option in the settings for trash items that cannot be removed normally.
+* Add: Dashboard warning when the manifest contains unsafe entries.
+* Update: Error messages for failed items are now grouped in scan results.
+* Update: Files are marked as unsafe instead of aborting the scan when fingerprinting fails.
 
 = 7.2.4 (2026/07/18) =
 * Fix: Stopped a single oversized media reference from aborting the whole scan.

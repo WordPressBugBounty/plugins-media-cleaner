@@ -17,6 +17,9 @@ if ( !class_exists( 'Meow_WPMC_Transient_Exception', false ) ) {
 
 class Meow_WPMC_Core {
 
+	// A file that exists but cannot be safely fingerprinted
+	const FINGERPRINT_UNSAFE = '@unsafe';
+
 	
 	public $admin = null;
 	public $is_rest = false;
@@ -783,7 +786,9 @@ class Meow_WPMC_Core {
 
 	// Simply use regex to get URLs from a string return an array of URLs
 	function get_urls_from_string( $string ) {
-		$this->assert_analysis_document_size( $string );
+		if ( $this->analysis_document_too_large( $string ) ) {
+			return array();
+		}
 		$urls = array();
 		// Replace the sanitized urls with the real ones to be sure to get them in the regex
 		$string = str_replace( '\\', '', $string );
@@ -812,7 +817,9 @@ class Meow_WPMC_Core {
 		if ( empty( $html ) ) {
 			return array();
 		}
-		$this->assert_analysis_document_size( $html );
+		if ( $this->analysis_document_too_large( $html ) ) {
+			return array();
+		}
 
 
 		// Proposal/fix by @copytrans
@@ -843,7 +850,9 @@ class Meow_WPMC_Core {
 		// Resolve src-set and shortcodes
 		if ( $this->get_shortcode_analysis() ) {
 			$html = do_shortcode( $html );
-			$this->assert_analysis_document_size( $html );
+			if ( $this->analysis_document_too_large( $html ) ) {
+				return array();
+			}
 		}
 
 		// Create the DOM Document
@@ -993,14 +1002,27 @@ class Meow_WPMC_Core {
 		return $results;
 	}
 
-	private function assert_analysis_document_size( $value ) {
-		$limit = max( 1024 * 1024, (int) apply_filters( 'wpmc_max_analysis_document_bytes', 8 * 1024 * 1024 ) );
-		if ( is_string( $value ) && strlen( $value ) > $limit ) {
-			throw new RuntimeException( sprintf(
-				__( 'A content document is larger than Media Cleaner\'s safe analysis limit of %s.', 'media-cleaner' ),
+	private function analysis_document_too_large( $value ) {
+		if ( !is_string( $value ) ) {
+			return false;
+		}
+		$limit = (int) $this->get_option( 'analysis_document_limit' );
+		// A filter can still override the stored setting for advanced setups.
+		$limit = (int) apply_filters( 'wpmc_max_analysis_document_bytes', $limit );
+		// -1 disables the limit: documents are analyzed no matter their size.
+		if ( $limit < 0 ) {
+			return false;
+		}
+		// Keep a 1 MB floor so a misconfigured tiny limit cannot cripple analysis.
+		$limit = max( 1024 * 1024, $limit );
+		if ( strlen( $value ) > $limit ) {
+			$this->log( sprintf(
+				__( '⚠️ Skipped a content document larger than the %s analysis limit.', 'media-cleaner' ),
 				size_format( $limit )
 			) );
+			return true;
 		}
+		return false;
 	}
 
 	/**
@@ -2040,6 +2062,51 @@ class Meow_WPMC_Core {
 		);
 	}
 
+	// A last resort for trash items that can no longer be emptied the normal way:
+	// their file has disappeared, changed, or become unsafe since the scan, so
+	// validate_issue_manifest() refuses them and the row stays stuck in the trash
+	// with the "run a new scan" error. This removes exactly those broken rows (and
+	// any physical file still sitting in quarantine), and leaves healthy, still
+	// recoverable trash untouched. It is safe precisely because it only acts on
+	// items whose backing file is already gone or unverifiable. Returns the count.
+	function force_clean_trash() {
+		$staged = $this->results_staged_error();
+		if ( $staged ) return $staged;
+		global $wpdb;
+		$table_name = $wpdb->prefix . 'mclean_scan';
+		$run_id = $this->get_run_id();
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM $table_name WHERE run_id = %d AND deleted = 1", $run_id ) );
+		if ( $rows === null ) {
+			return new WP_Error( 'wpmc_force_clean_trash_failed', __( 'Media Cleaner could not read the trash records.', 'media-cleaner' ) );
+		}
+		$removed = 0;
+		foreach ( $rows as $issue ) {
+			// Only the items that cannot be cleaned normally: a healthy trash item
+			// validates fine and is left recoverable.
+			if ( !is_wp_error( $this->validate_issue_manifest( $issue ) ) ) continue;
+
+			// Best effort: drop any file still physically in quarantine, then the row.
+			// Directories and symlinks are never removed, and a missing or unsafe path
+			// is skipped rather than fatal — the point is to unstick the record.
+			$manifest = json_decode( (string) $issue->manifest, true );
+			$relatives = is_array( $manifest ) ? array_keys( $manifest ) : array();
+			if ( empty( $relatives ) && (int) $issue->type === 0 ) {
+				$relatives[] = preg_replace( '/\s\(\+.*$/', '', (string) $issue->path );
+			}
+			foreach ( $relatives as $relative ) {
+				$trash_path = $this->resolve_trash_path( $relative );
+				if ( is_wp_error( $trash_path ) ) continue;
+				if ( file_exists( $trash_path ) && !is_dir( $trash_path ) && !is_link( $trash_path ) ) {
+					@unlink( $trash_path );
+				}
+			}
+			if ( $wpdb->query( $wpdb->prepare( "DELETE FROM $table_name WHERE id = %d", $issue->id ) ) !== false ) {
+				$removed++;
+			}
+		}
+		return $removed;
+	}
+
 	/**
 	 *
 	 * SCANNING / RESET
@@ -2731,22 +2798,35 @@ class Meow_WPMC_Core {
 			$relative = $this->normalize_upload_relative_path( $this->clean_uploaded_filename( $path ) );
 			if ( is_wp_error( $relative ) ) return $relative;
 			$absolute = $this->resolve_upload_path( $relative );
-			if ( is_wp_error( $absolute ) ) return $absolute;
-			$fingerprint = $this->file_fingerprint( $absolute );
-			if ( is_wp_error( $fingerprint ) ) return $fingerprint;
-			$manifest[ $relative ] = $fingerprint;
+			if ( is_wp_error( $absolute ) ) {
+				// Instead of propagating an error, mark the file as unsafe and continue.
+				// This allows a scan to complete even if some files can't be fingerprinted.
+				$code = $absolute->get_error_code();
+				if ( $code === 'wpmc_symlink_rejected' || $code === 'wpmc_path_outside_uploads' ) {
+					$manifest[ $relative ] = self::FINGERPRINT_UNSAFE;
+					continue;
+				}
+				return $absolute;
+			}
+			$manifest[ $relative ] = $this->file_fingerprint( $absolute );
 		}
 		return $manifest;
 	}
 
+	// Returns null for a file that does not exist, a 64-char sha256 fingerprint for a
+	// normal file, or the FINGERPRINT_UNSAFE sentinel for a file that exists but cannot be
+	// safely fingerprinted.
 	public function file_fingerprint( $absolute_path ) {
 		if ( !file_exists( $absolute_path ) ) return null;
 		if ( !is_file( $absolute_path ) || !is_readable( $absolute_path ) || is_link( $absolute_path ) ) {
-			return new WP_Error( 'wpmc_file_identity_unsafe', __( 'A file selected by Media Cleaner is unreadable or unsafe.', 'media-cleaner' ) );
+			return self::FINGERPRINT_UNSAFE;
 		}
 		$stat = @lstat( $absolute_path );
 		$handle = @fopen( $absolute_path, 'rb' );
-		if ( !$stat || !$handle ) return new WP_Error( 'wpmc_file_identity_unavailable', __( 'Media Cleaner could not capture a file identity.', 'media-cleaner' ) );
+		if ( !$stat || !$handle ) {
+			if ( $handle ) fclose( $handle );
+			return self::FINGERPRINT_UNSAFE;
+		}
 		$context = hash_init( 'sha256' );
 		hash_update( $context, wp_json_encode( array(
 			'size' => isset( $stat['size'] ) ? (int) $stat['size'] : 0,
@@ -2758,7 +2838,7 @@ class Meow_WPMC_Core {
 		$first = fread( $handle, $sample_size );
 		if ( $first === false ) {
 			fclose( $handle );
-			return new WP_Error( 'wpmc_file_identity_unavailable', __( 'Media Cleaner could not read a file identity sample.', 'media-cleaner' ) );
+			return self::FINGERPRINT_UNSAFE;
 		}
 		hash_update( $context, $first );
 		if ( (int) $stat['size'] > $sample_size ) {
@@ -2766,7 +2846,7 @@ class Meow_WPMC_Core {
 			$last = fread( $handle, $sample_size );
 			if ( $last === false ) {
 				fclose( $handle );
-				return new WP_Error( 'wpmc_file_identity_unavailable', __( 'Media Cleaner could not read a file identity sample.', 'media-cleaner' ) );
+				return self::FINGERPRINT_UNSAFE;
 			}
 			hash_update( $context, $last );
 		}
@@ -2778,6 +2858,10 @@ class Meow_WPMC_Core {
 		$manifest = json_decode( (string) $issue->manifest, true );
 		if ( !is_array( $manifest ) ) return true;
 		foreach ( $manifest as $relative => $expected ) {
+			// We throw an error for the unasfe tag only in the context of cleanup, not in the context of scanning.
+			if ( $expected === self::FINGERPRINT_UNSAFE ) {
+				return new WP_Error( 'wpmc_file_unsafe_for_cleanup', __( 'This item includes a file that cannot be safely verified (a symbolic link, an unreadable file, or a special file), so Media Cleaner will not touch it. Fix or remove that file, then run a new scan.', 'media-cleaner' ) );
+			}
 			$upload = $this->resolve_upload_path( $relative );
 			$trash = $this->resolve_trash_path( $relative );
 			if ( is_wp_error( $upload ) ) return $upload;
@@ -2788,8 +2872,9 @@ class Meow_WPMC_Core {
 				continue;
 			}
 			if ( !$existing ) return new WP_Error( 'wpmc_file_changed_since_scan', __( 'A file disappeared after the scan. Run a new scan before cleanup.', 'media-cleaner' ) );
+			// A real fingerprint that no longer matches — including a file that has since
+			// become unsafe and now returns the sentinel — means the file changed.
 			$current = $this->file_fingerprint( $existing );
-			if ( is_wp_error( $current ) ) return $current;
 			if ( !hash_equals( (string) $expected, (string) $current ) ) {
 				return new WP_Error( 'wpmc_file_changed_since_scan', __( 'A file changed after the scan. Run a new scan before cleanup.', 'media-cleaner' ) );
 			}
@@ -3179,6 +3264,7 @@ class Meow_WPMC_Core {
 			'uploads_file_buffer' => 500,
 			'delay' => 100,
 			'refs_buffer' => 500,
+			'analysis_document_limit' => 8 * 1024 * 1024,
 			'shortcodes_disabled' => false,
 
 			'output_buffer_cleaning_disabled' => false,
@@ -3242,7 +3328,7 @@ class Meow_WPMC_Core {
 			'content', 'filesystem_content', 'media_library', 'images_only', 'attach_is_use',
 			'thumbnails_only', 'dirs_filter', 'files_filter', 'shortcodes_disabled',
 			'thumbnail_force_issues', 'posts_buffer', 'medias_buffer', 'analysis_buffer',
-			'uploads_file_buffer', 'refs_buffer', 'delay',
+			'uploads_file_buffer', 'refs_buffer', 'delay', 'analysis_document_limit',
 		);
 		$snapshot = array();
 		foreach ( $names as $name ) {
@@ -3278,6 +3364,12 @@ class Meow_WPMC_Core {
 		if ( isset( $ranges[ $name ] ) ) {
 			$number = is_numeric( $value ) ? (int) $value : (int) $default;
 			return max( $ranges[ $name ][0], min( $ranges[ $name ][1], $number ) );
+		}
+
+		if ( $name === 'analysis_document_limit' ) {
+			$number = is_numeric( $value ) ? (int) $value : (int) $default;
+			// -1 is the sentinel for "no limit"; any other value is floored at 1 MB.
+			return $number === -1 ? -1 : max( 1024 * 1024, $number );
 		}
 
 		if ( $name === 'method' ) {

@@ -88,6 +88,11 @@ class Meow_WPMC_Rest
 				'permission_callback' => array( $this->core, 'can_access_features' ),
 				'callback' => array( $this, 'rest_force_trash_all' )
 			) );
+			register_rest_route( $this->namespace, '/force_clean_trash', array(
+				'methods' => 'POST',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_force_clean_trash' )
+			) );
 			register_rest_route( $this->namespace, '/recover', array(
 				'methods' => 'POST',
 				'permission_callback' => array( $this->core, 'can_access_features' ),
@@ -1656,7 +1661,7 @@ class Meow_WPMC_Rest
 			$order_direction = $order === 'asc' ? 'ASC' : 'DESC';
 			$search_sql = empty( $search ) ? '' : $wpdb->prepare( 'AND path LIKE %s', '%' . $wpdb->esc_like( $search ) . '%' );
 			$entries = $wpdb->get_results( $wpdb->prepare(
-				"SELECT id, type, postId, path, size, ignored, deleted, issue, time
+				"SELECT id, type, postId, path, size, ignored, deleted, issue, time, manifest
 				FROM $table_scan
 				WHERE run_id = %d AND $filter_sql $search_sql
 				ORDER BY $order_column $order_direction
@@ -1670,6 +1675,14 @@ class Meow_WPMC_Rest
 		$is_trash = $filterBy === 'trash';
 		$base = $this->core->upload_url;
 		foreach ( $entries as $entry ) {
+			// An item that includes a file marked unsafe during the scan can never be
+			// cleaned (delete() refuses it), so the dashboard flags it and locks its
+			// selection. The manifest itself is internal and is not sent to the client.
+			if ( property_exists( $entry, 'manifest' ) ) {
+				$manifest = json_decode( (string) $entry->manifest, true );
+				$entry->unsafe = is_array( $manifest ) && in_array( Meow_WPMC_Core::FINGERPRINT_UNSAFE, $manifest, true );
+				unset( $entry->manifest );
+			}
 			if ( $is_trash ) {
 				// The trash lives outside the uploads folder, so it has no public URL.
 				// The preview is streamed by the plugin instead of being linked.
@@ -1856,6 +1869,26 @@ class Meow_WPMC_Rest
 			'success' => true,
 			'data' => $res,
 			'message' => !empty( $res['finished'] ) ? __( 'The Media Cleaner trash has been emptied.', 'media-cleaner' ) : __( 'Media Cleaner emptied another bounded trash batch.', 'media-cleaner' ),
+		), 200 );
+	}
+
+	// A last resort for stuck trash rows whose file has vanished, changed, or become
+	// unsafe since the scan, so the normal Empty Trash refuses them. It removes only
+	// those broken rows (and any file left in quarantine); healthy, still recoverable
+	// trash is left untouched. Emptying the trash needs no scan.
+	function rest_force_clean_trash() {
+		$deleted = $this->core->force_clean_trash();
+		if ( is_wp_error( $deleted ) ) return $this->error_response( $deleted );
+		return new WP_REST_Response( array(
+			'success' => true,
+			'data' => array( 'deleted' => $deleted ),
+			'message' => $deleted > 0
+				? sprintf(
+					/* translators: %d is the number of broken trash items that were removed. */
+					_n( '%d stuck trash item was removed.', '%d stuck trash items were removed.', $deleted, 'media-cleaner' ),
+					$deleted
+				)
+				: __( 'No stuck trash items were found. Your trash is already clean.', 'media-cleaner' ),
 		), 200 );
 	}
 
