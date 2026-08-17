@@ -74,6 +74,138 @@ class MeowKit_WPMC_Rest {
       'permission_callback' => $permission,
       'callback' => [ $this, 'rest_installed_plugins' ]
     ] );
+    // The analysis needs PHP for one reason: $mwai is a PHP global, so the AI
+    // call cannot be made from the dashboard's JavaScript. Everything it
+    // analyses is gathered in the browser and posted here.
+    register_rest_route( $this->namespace, '/analysis_status/', [
+      'methods' => 'POST',
+      'permission_callback' => $permission,
+      'callback' => [ $this, 'rest_analysis_status' ]
+    ] );
+    register_rest_route( $this->namespace, '/analysis_run/', [
+      'methods' => 'POST',
+      'permission_callback' => $permission,
+      'callback' => [ $this, 'rest_analysis_run' ]
+    ] );
+    register_rest_route( $this->namespace, '/analysis_forget/', [
+      'methods' => 'POST',
+      'permission_callback' => $permission,
+      'callback' => [ $this, 'rest_analysis_forget' ]
+    ] );
+  }
+
+  /**
+   * Throw away the stored analysis and the consent that went with it.
+   *
+   * The analysis writes a verdict about this site into the options table and
+   * keeps it. That is what makes it survive a reload, but it also means a
+   * description of your server's weaknesses — written by a third-party model —
+   * sits there indefinitely with nothing to remove it. Somebody should be able
+   * to take it back, and clearing the consent means the panel explaining what
+   * gets sent is shown again before anything is sent a second time.
+   */
+  public function rest_analysis_forget() {
+    delete_option( 'meowapps_analysis_last' );
+    delete_option( 'meowapps_analysis_consented' );
+    return new WP_REST_Response( [ 'success' => true ], 200 );
+  }
+
+  /**
+   * Whether an analysis can be run, and the last one if there is one.
+   *
+   * Three states matter and they are not the same: AI Engine absent, AI Engine
+   * present but with no API key configured, and ready. Telling the second from
+   * the first is what lets the dashboard say "finish setting it up" rather than
+   * "install this", which would be wrong and mildly insulting.
+   */
+  public function rest_analysis_status() {
+    global $mwai;
+    $installed = !empty( $mwai );
+    $ready = $installed && method_exists( $mwai, 'hasAI' ) && $mwai->hasAI();
+    return new WP_REST_Response( [ 'success' => true, 'data' => [
+      'installed' => $installed,
+      'ready' => $ready,
+      'consented' => (bool) get_option( 'meowapps_analysis_consented', false ),
+      'last' => get_option( 'meowapps_analysis_last', null ),
+    ] ], 200 );
+  }
+
+  public function rest_analysis_run( $request ) {
+    global $mwai;
+    if ( empty( $mwai ) || !method_exists( $mwai, 'simpleJsonQuery' ) ) {
+      return new WP_REST_Response( [ 'success' => false,
+        'message' => 'AI Engine is not available on this site.' ], 200 );
+    }
+    if ( !method_exists( $mwai, 'hasAI' ) || !$mwai->hasAI() ) {
+      return new WP_REST_Response( [ 'success' => false,
+        'message' => 'AI Engine has no AI environment configured yet.' ], 200 );
+    }
+
+    $params = $request->get_json_params();
+    $facts = isset( $params['facts'] ) ? $params['facts'] : [];
+
+    // Consent is recorded when a run is actually asked for, so the panel is
+    // shown once rather than on every visit.
+    update_option( 'meowapps_analysis_consented', '1' );
+
+    try {
+      $reply = $mwai->simpleJsonQuery( $this->analysis_prompt( $facts ) );
+    }
+    catch ( Exception $e ) {
+      return new WP_REST_Response( [ 'success' => false, 'message' => $e->getMessage() ], 200 );
+    }
+
+    $verdict = is_string( $reply ) ? json_decode( $reply, true ) : $reply;
+    if ( empty( $verdict ) || !is_array( $verdict ) ) {
+      return new WP_REST_Response( [ 'success' => false,
+        'message' => 'The AI reply could not be read as JSON.' ], 200 );
+    }
+
+    $verdict['ranAt'] = current_time( 'mysql' );
+    update_option( 'meowapps_analysis_last', $verdict );
+
+    return new WP_REST_Response( [ 'success' => true, 'data' => $verdict ], 200 );
+  }
+
+  /**
+   * Written for the person who owns the site, not for a developer: somebody who
+   * installed a plugin, not somebody who knows what max_execution_time is.
+   *
+   * Meow Apps plugins may be named as a remedy, but only where one genuinely
+   * fixes the finding. An analysis that recommends its own author's plugins for
+   * everything is an advert, and would be read as one.
+   */
+  private function analysis_prompt( $facts ) {
+    $json = wp_json_encode( $facts, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
+    return "You are reviewing a WordPress site's health for the person who owns it.\n"
+      . "They are not a developer: explain what something means and why it matters before saying "
+      . "what to do, and never assume they know what a PHP directive is.\n\n"
+      . "Here is what was measured on their site:\n\n$json\n\n"
+      . "Reply with JSON in exactly this shape:\n"
+      . "{\n"
+      . '  "areas": [ { "area": "Speed|Environment|Errors", "rating": 1-5, '
+      . '"label": "a two or three word verdict", "summary": "one plain sentence" } ],' . "\n"
+      . '  "findings": [ { "area": "Speed|Environment|Errors", "severity": "high|medium|low", '
+      . '"title": "the recommendation itself, plain, under 60 characters", '
+      . '"detail": "at most two short sentences on what it means and why it matters", '
+      . '"action": "one sentence saying what to do", '
+      . '"plugin": "meow plugin slug or null" } ],' . "\n"
+      . '  "conclusion": "two short sentences tying it together"' . "\n"
+      . "}\n\n"
+      . "Rules:\n"
+      . "- Rate each of the three areas from 1 (bad) to 5 (good). Do not invent an overall score.\n"
+      . "- Only report findings genuinely worth acting on. An empty findings list is a perfectly "
+      . "good answer for a healthy site — do not manufacture problems.\n"
+      . "- Order findings by how much they matter, worst first.\n"
+      . "- Be brief. The reader sees the titles first and opens the ones they care about, so a "
+      . "title has to work on its own and the detail must not repeat it. No preamble, no restating "
+      . "the question, no filler.\n"
+      . "- Set \"plugin\" to one of these Meow Apps slugs ONLY when that plugin genuinely fixes the "
+      . "finding, otherwise null: ai-engine, code-engine, contact-form-block, database-cleaner, "
+      . "media-cleaner, media-file-renamer, meow-gallery, meow-lightbox, meow-mailer, seo-engine, "
+      . "social-engine, wp-retina-2x, wplr-sync.\n"
+      . "- If an error in the log comes from a specific plugin, say which one.\n"
+      . "- Write in the language of this site: " . get_bloginfo( 'language' ) . ".";
   }
 
   public function file_rand( $filesize ) {

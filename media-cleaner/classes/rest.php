@@ -37,6 +37,29 @@ class Meow_WPMC_Rest
 				'permission_callback' => array( $this->core, 'can_access_features' ),
 				'callback' => array( $this, 'rest_all_settings' ),
 			) );
+			// The buffer benchmark is driven by the dashboard: it asks for a plan, runs each
+			// step as its own request so the real cost of a request is part of the measurement,
+			// then sends everything back to be fitted and stored.
+			register_rest_route( $this->namespace, '/auto_buffers/plan', array(
+				'methods' => 'POST',
+				'permission_callback' => array( $this->core, 'can_access_settings' ),
+				'callback' => array( $this, 'rest_auto_buffers_plan' )
+			) );
+			register_rest_route( $this->namespace, '/auto_buffers/measure', array(
+				'methods' => 'POST',
+				'permission_callback' => array( $this->core, 'can_access_settings' ),
+				'callback' => array( $this, 'rest_auto_buffers_measure' )
+			) );
+			register_rest_route( $this->namespace, '/auto_buffers/preview', array(
+				'methods' => 'POST',
+				'permission_callback' => array( $this->core, 'can_access_settings' ),
+				'callback' => array( $this, 'rest_auto_buffers_preview' )
+			) );
+			register_rest_route( $this->namespace, '/auto_buffers/apply', array(
+				'methods' => 'POST',
+				'permission_callback' => array( $this->core, 'can_access_settings' ),
+				'callback' => array( $this, 'rest_auto_buffers_apply' )
+			) );
 
 			// STATS & LISTING
 			register_rest_route( $this->namespace, '/count', array(
@@ -1395,6 +1418,67 @@ class Meow_WPMC_Rest
 			$options = $this->core->update_options( $value );
 			return new WP_REST_Response([ 'success' => true, 'message' => 'OK', 'options' => $this->settings_options_payload( $options ) ], 200 );
 		} 
+		catch ( Throwable $e ) {
+			return $this->error_response( $e );
+		}
+	}
+
+	// Buffers only split the work across requests, so the benchmark below can be re-run at will
+	// and never affects what a scan finds.
+	function rest_auto_buffers_plan() {
+		try {
+			$buffers = new Meow_WPMC_Buffers( $this->core );
+			$plan = $buffers->plan();
+			if ( is_wp_error( $plan ) ) return $this->error_response( $plan );
+			return new WP_REST_Response([ 'success' => true, 'plan' => $plan ], 200 );
+		}
+		catch ( Throwable $e ) {
+			return $this->error_response( $e );
+		}
+	}
+
+	function rest_auto_buffers_measure( $request ) {
+		try {
+			$params = $this->request_json( $request );
+			$probe = isset( $params['probe'] ) ? sanitize_key( $params['probe'] ) : '';
+			$items = isset( $params['items'] ) ? (int) $params['items'] : 0;
+			$buffers = new Meow_WPMC_Buffers( $this->core );
+			$result = $buffers->measure( $probe, $items );
+			if ( is_wp_error( $result ) ) return $this->error_response( $result );
+			return new WP_REST_Response([ 'success' => true, 'round' => $result ], 200 );
+		}
+		catch ( Throwable $e ) {
+			return $this->error_response( $e );
+		}
+	}
+
+	// Same calculation as apply(), without storing anything: this is what the modal shows so
+	// the user can see the proposed buffers before deciding.
+	function rest_auto_buffers_preview( $request ) {
+		try {
+			$params = $this->request_json( $request );
+			$rounds = isset( $params['rounds'] ) && is_array( $params['rounds'] ) ? $params['rounds'] : array();
+			$buffers = new Meow_WPMC_Buffers( $this->core );
+			return new WP_REST_Response([ 'success' => true, 'report' => $buffers->recommend( $rounds ) ], 200 );
+		}
+		catch ( Throwable $e ) {
+			return $this->error_response( $e );
+		}
+	}
+
+	function rest_auto_buffers_apply( $request ) {
+		try {
+			$params = $this->request_json( $request );
+			$rounds = isset( $params['rounds'] ) && is_array( $params['rounds'] ) ? $params['rounds'] : array();
+			$buffers = new Meow_WPMC_Buffers( $this->core );
+			$report = $buffers->apply( $rounds );
+			if ( is_wp_error( $report ) ) return $this->error_response( $report );
+			return new WP_REST_Response([
+				'success' => true,
+				'report' => $report,
+				'options' => $this->settings_options_payload()
+			], 200 );
+		}
 		catch ( Throwable $e ) {
 			return $this->error_response( $e );
 		}

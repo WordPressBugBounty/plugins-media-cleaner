@@ -48,6 +48,8 @@ class Meow_WPMC_Core {
 	private $multilingual = false;
 	private $languages = array();
 	private $shortcode_analysis = false;
+	private $translated_ids_cache = array();
+	private $url_id_cache = array();
 	private $trash_migration_error = null;
 	private $parser_query_guard_active = false;
 	private $parser_query_guard_label = '';
@@ -121,6 +123,11 @@ class Meow_WPMC_Core {
 		global $wpmc;
 		$wpmc = $this;
 
+		// MCP tools, served through AI Engine.
+		if ( class_exists( 'Meow_MWAI_Core' ) || isset( $GLOBALS['mwai'] ) ) {
+			new Meow_WPMC_MCP( $this );
+		}
+
 		$shouldLoad = ( defined( 'WP_CLI' ) && WP_CLI ) || $is_wpmc_screen || $is_wpmc_rest || $is_mcp_rest;
 
 		if ( ! $shouldLoad ) {
@@ -145,10 +152,7 @@ class Meow_WPMC_Core {
 			new Meow_WPMC_Rest( $this, $this->admin );
 		}
 
-		// MCP tools, served through AI Engine.
-		if ( class_exists( 'Meow_MWAI_Core' ) || isset( $GLOBALS['mwai'] ) ) {
-			new Meow_WPMC_MCP( $this );
-		}
+		
 
 		
 	}
@@ -257,14 +261,22 @@ class Meow_WPMC_Core {
 		if ( preg_match( '/\bLIMIT\s+\d+/i', $normalized ) ) return $query;
 		if ( preg_match( '/^SELECT\s+(?:DISTINCT\s+)?(?:COUNT|SUM|MIN|MAX|AVG|EXISTS)\s*\(/i', $normalized ) ) return $query;
 		if ( preg_match( '/\b(?:ID|post_id|meta_id|term_id|term_taxonomy_id|option_id|option_name|user_id)\s*(?:=|IN\s*\()/i', $normalized ) ) return $query;
+		// Only Media Cleaner's own SQL is a Media Cleaner bug. WordPress and other plugins
+		// (WPML translates media while our parsers run) issue their own unbounded SELECTs
+		// during a scan, and blaming the parser for those is noise nobody can act on.
+		$origin = $this->plugin_query_origin();
+		if ( $origin === null ) return $query;
 		$label = $this->parser_query_guard_label ?: 'A compatibility parser';
 		$message = sprintf(
 			__( '%s attempted an unbounded database query. Its Media Cleaner parser should use pagination.', 'media-cleaner' ),
 			$label
 		);
-		if ( empty( $this->parser_query_guard_warnings[ $label ] ) ) {
-			$this->parser_query_guard_warnings[ $label ] = true;
-			$this->log( $message );
+		// The query is rarely written in the parser itself: it is usually a helper it calls.
+		// Log where it came from, otherwise the warning cannot be acted upon.
+		$warning_key = $label . '|' . $origin;
+		if ( empty( $this->parser_query_guard_warnings[ $warning_key ] ) ) {
+			$this->parser_query_guard_warnings[ $warning_key ] = true;
+			$this->log( $message . " ({$origin}) " . substr( $normalized, 0, 500 ) );
 		}
 
 		// Strict mode is useful for parser development, but is unsafe for normal scans because
@@ -273,6 +285,26 @@ class Meow_WPMC_Core {
 			throw new RuntimeException( $message );
 		}
 		return $query;
+	}
+
+	// Returns "file.php:line" when the running query was issued by Media Cleaner itself,
+	// null when it belongs to WordPress or another plugin. The backtrace is only taken for
+	// queries that already look unbounded, so it stays out of the normal scan path.
+	private function plugin_query_origin() {
+		$issuer = null;
+		foreach ( debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS, 24 ) as $frame ) {
+			// A frame records where its function was called from, so the outermost $wpdb
+			// frame ($wpdb->get_var, get_results...) is the one holding the location of
+			// whoever asked for the query. Everything inside it, and everything above it
+			// up to this guard, is plumbing.
+			$class = isset( $frame['class'] ) ? $frame['class'] : '';
+			if ( $class !== 'wpdb' && !is_subclass_of( $class, 'wpdb' ) ) continue;
+			if ( !empty( $frame['file'] ) ) $issuer = $frame;
+		}
+		if ( !$issuer ) return null;
+		$file = wp_normalize_path( $issuer['file'] );
+		if ( strpos( $file, trailingslashit( wp_normalize_path( WPMC_PATH ) ) ) !== 0 ) return null;
+		return basename( $file ) . ':' . ( isset( $issuer['line'] ) ? (int) $issuer['line'] : 0 );
 	}
 
 	private function callback_name( $callback ) {
@@ -1456,6 +1488,9 @@ class Meow_WPMC_Core {
 	}
 
 	function get_translated_media_ids( $mediaId ) {
+		if ( isset( $this->translated_ids_cache[ $mediaId ] ) ) {
+			return $this->translated_ids_cache[ $mediaId ];
+		}
 		$translated_ids = array();
 		foreach ( $this->languages as $language ) {
 			$id = apply_filters( 'wpml_object_id', $mediaId, 'attachment', false, $language );
@@ -1463,6 +1498,7 @@ class Meow_WPMC_Core {
 				array_push( $translated_ids, $id );
 			}
 		}
+		$this->translated_ids_cache[ $mediaId ] = $translated_ids;
 		return $translated_ids;
 	}
 
@@ -2126,7 +2162,10 @@ class Meow_WPMC_Core {
 
 			if ( $this->multilingual ) {
 				if ( $this->current_method == 'media' ) {
-					$id  = $this->get_id_from_clean_url( $no_res_url, false );
+					if ( !array_key_exists( $no_res_url, $this->url_id_cache ) ) {
+						$this->url_id_cache[ $no_res_url ] = $this->get_id_from_clean_url( $no_res_url );
+					}
+					$id = $this->url_id_cache[ $no_res_url ];
 					if( $id ) $this->add_reference_id( $id, $type, $origin, $extra );
 				}
 			}
@@ -2158,7 +2197,7 @@ class Meow_WPMC_Core {
 
 		// Check if this issue already exists
 		$existing = $wpdb->get_var( $wpdb->prepare( 
-			"SELECT id FROM $table_name WHERE run_id = %d AND path_hash = %s AND path = %s AND issue = %s",
+			"SELECT id FROM $table_name WHERE run_id = %d AND path_hash = %s AND path = %s AND issue = %s LIMIT 1",
 			$run_id, $path_hash, $clean_path, $issue
 		) );
 		
@@ -2168,7 +2207,7 @@ class Meow_WPMC_Core {
 
 		// Find potential parent
 		$potentialParentPath = $this->clean_url_from_resolution( $clean_path );
-		$parentId = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table_name WHERE run_id = %d AND path_hash = %s AND path = %s", $run_id, hash( 'sha256', $potentialParentPath ), $potentialParentPath ) );
+		$parentId = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table_name WHERE run_id = %d AND path_hash = %s AND path = %s LIMIT 1", $run_id, hash( 'sha256', $potentialParentPath ), $potentialParentPath ) );
 		$parentId = $parentId ? (int)$parentId : null;
 
 		$inserted = $wpdb->insert( $table_name,
@@ -2461,7 +2500,7 @@ class Meow_WPMC_Core {
 		// Resolve parentId for potential children
 		foreach ( $potential_children as &$child ) {
 			$potentialParentPath = $this->clean_url_from_resolution( $child['url'] );
-			$parentId = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table WHERE run_id = %d AND mediaUrl_hash = %s AND mediaUrl = %s", $run_id, hash( 'sha256', $potentialParentPath ), $potentialParentPath ) );
+			$parentId = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table WHERE run_id = %d AND mediaUrl_hash = %s AND mediaUrl = %s LIMIT 1", $run_id, hash( 'sha256', $potentialParentPath ), $potentialParentPath ) );
 			if ( !empty( $parentId ) ) {
 				$child['parentId'] = (int)$parentId;
 			}
@@ -2497,7 +2536,8 @@ class Meow_WPMC_Core {
 		$sql = $wpdb->prepare( "SELECT post_id
 			FROM {$postmeta_table_name}
 			WHERE meta_key = '_wp_attached_file'
-			AND meta_value = %s", $file
+			AND meta_value = %s
+			LIMIT 1", $file
 		);
 		$ret = $wpdb->get_var( $sql );
 		if ( $doLog ) {
@@ -2686,9 +2726,11 @@ class Meow_WPMC_Core {
 		$pattern = '/[_-]\d+x\d+(?=\.[a-z]{3,4}$)/';
 		$url = preg_replace( $pattern, '', $url );
 		$url = $this->get_pathinfo_from_image_src( $url );
-		$query = $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE guid LIKE '%s'", '%' . $url . '%' );
-		$attachment = $wpdb->get_col( $query );
-		return empty( $attachment ) ? null : $attachment[0];
+		// A guid LIKE '%...%' cannot use an index, so it must never bring back more than the one
+		// row this function actually uses.
+		$query = $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE guid LIKE '%s' LIMIT 1", '%' . $url . '%' );
+		$attachment = $wpdb->get_var( $query );
+		return empty( $attachment ) ? null : $attachment;
 	}
 
 	function get_pathinfo_from_image_src( $image_src ) {
@@ -2738,22 +2780,22 @@ class Meow_WPMC_Core {
 		$url = preg_replace('/\?.*/', '', $url);
 		
 		// Try to find the attachment ID by matching the URL with the guid
-		$attachment = $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE guid LIKE %s AND post_type = 'attachment';", '%' . $wpdb->esc_like( $url ) ) );
-		
+		$attachment = $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE guid LIKE %s AND post_type = 'attachment' LIMIT 1;", '%' . $wpdb->esc_like( $url ) ) );
+
 		// If found, return the first attachment ID
 		if ( !empty( $attachment ) ) {
-			return ( int )$attachment[0];
+			return ( int )$attachment;
 		}
 		
 		// If not found, try to match the URL without the upload directory path
 		$upload_dir = wp_upload_dir();
 		$url_relative = str_replace( $upload_dir['baseurl'] . '/', '', $url );
 		
-		$attachment = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM $wpdb->postmeta WHERE meta_key = '_wp_attached_file' AND meta_value LIKE %s;", '%' . $wpdb->esc_like( $url_relative ) ) );
-		
+		$attachment = $wpdb->get_var( $wpdb->prepare( "SELECT post_id FROM $wpdb->postmeta WHERE meta_key = '_wp_attached_file' AND meta_value LIKE %s LIMIT 1;", '%' . $wpdb->esc_like( $url_relative ) ) );
+
 		// If found, return the first attachment ID
 		if ( !empty( $attachment ) ) {
-			return ( int )$attachment[0];
+			return ( int )$attachment;
 		}
 		
 		// If still not found, return 0
@@ -3339,6 +3381,21 @@ class Meow_WPMC_Core {
 		return $snapshot;
 	}
 
+	// The accepted range of every numeric option. Stored values and the values proposed by
+	// Meow_WPMC_Buffers are clamped through this same table, so "too big" is defined once.
+	public function option_ranges() {
+		return array(
+			'medias_buffer' => array( 1, 500 ),
+			'posts_buffer' => array( 1, 100 ),
+			'analysis_buffer' => array( 1, 500 ),
+			'file_op_buffer' => array( 1, 100 ),
+			'uploads_file_buffer' => array( 10, 1000 ),
+			'delay' => array( 0, 10000 ),
+			'refs_buffer' => array( 10, 1000 ),
+			'posts_per_page' => array( 5, 100 ),
+		);
+	}
+
 	private function sanitize_option_value( $name, $value, $default ) {
 		$boolean_options = array(
 			'content', 'filesystem_content', 'media_library', 'live_content', 'debuglogs',
@@ -3351,16 +3408,7 @@ class Meow_WPMC_Core {
 			return rest_sanitize_boolean( $value );
 		}
 
-		$ranges = array(
-			'medias_buffer' => array( 1, 500 ),
-			'posts_buffer' => array( 1, 100 ),
-			'analysis_buffer' => array( 1, 500 ),
-			'file_op_buffer' => array( 1, 100 ),
-			'uploads_file_buffer' => array( 10, 1000 ),
-			'delay' => array( 0, 10000 ),
-			'refs_buffer' => array( 10, 1000 ),
-			'posts_per_page' => array( 5, 100 ),
-		);
+		$ranges = $this->option_ranges();
 		if ( isset( $ranges[ $name ] ) ) {
 			$number = is_numeric( $value ) ? (int) $value : (int) $default;
 			return max( $ranges[ $name ][0], min( $ranges[ $name ][1], $number ) );

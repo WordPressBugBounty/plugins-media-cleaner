@@ -4,8 +4,8 @@ Tags: clean, media, files, images, library
 Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.0
-Requires PHP: 7.4
-Stable tag: 7.2.5
+Requires PHP: 8.1
+Stable tag: 7.2.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,14 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.6 (2026/08/17) =
+* Add: Support for SiteOrigin Page Builder.
+* Add: Auto Buffer helper that sets the advanced buffer value from server tests, with warnings for slow items.
+* Add: Plugin board and AI site analysis to the dashboard.
+* Fix: Query handling and logging for unbounded database queries.
+* Fix: MCP tools were initialised before the plugin load check.
+* Update: Minimum PHP version is now 8.1.
 
 = 7.2.5 (2026/07/25) =
 * Fix: Document size validation no longer stops scans, and the size limit is now configurable.
