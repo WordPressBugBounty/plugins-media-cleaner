@@ -20,6 +20,14 @@ class Meow_WPMC_Core {
 	// A file that exists but cannot be safely fingerprinted
 	const FINGERPRINT_UNSAFE = '@unsafe';
 
+	// What makes a private directory private, and the only files in the trash that
+	// are not trash. Written when the directory is created, skipped when it is read.
+	const PRIVATE_GUARDS = array(
+		'index.php' => "<?php\nhttp_response_code( 404 );\nexit;\n",
+		'.htaccess' => "Options -Indexes\n<IfModule mod_authz_core.c>Require all denied</IfModule>\n<IfModule !mod_authz_core.c>Deny from all</IfModule>\n",
+		'web.config' => "<?xml version=\"1.0\"?><configuration><system.webServer><security><authorization><remove users=\"*\" roles=\"\" verbs=\"\"/><add accessType=\"Deny\" users=\"*\"/></authorization></security></system.webServer></configuration>",
+	);
+
 	
 	public $admin = null;
 	public $is_rest = false;
@@ -234,7 +242,10 @@ class Meow_WPMC_Core {
 					}
 					catch ( Throwable $e ) {
 						if ( $journal ) $this->runs->update_work( $journal->id, 'failed', $journal->cursor_value, $e );
-						throw new RuntimeException( sprintf( __( '%1$s failed in %2$s: %3$s', 'media-cleaner' ), $callback_name, $hook_name, $e->getMessage() ), 0, $e );
+						// Parsers run third-party code (shortcodes, gallery hooks, theme filters), so the crash is
+						// often not in the parser named here. Without the origin file, a message like
+						// "Call to a member function get() on null" cannot be traced to the plugin at fault.
+						throw new RuntimeException( sprintf( __( '%1$s failed in %2$s: %3$s (%4$s)', 'media-cleaner' ), $callback_name, $hook_name, $e->getMessage(), $this->throwable_origin( $e ) ), 0, $e );
 					}
 					finally {
 						$this->parser_query_guard_active = $guard_was_active;
@@ -252,6 +263,24 @@ class Meow_WPMC_Core {
 		finally {
 			array_pop( $wp_current_filter );
 		}
+	}
+
+	// Where a parser failure actually happened. The innermost throwable is the real one: everything
+	// above it is our own rethrow. The path is trimmed to wp-content so the plugin or theme at fault
+	// is readable at a glance, and the full trace goes to the PHP log for support.
+	private function throwable_origin( Throwable $e ) {
+		$root = $e;
+		while ( $root->getPrevious() ) {
+			$root = $root->getPrevious();
+		}
+		$file = $root->getFile();
+		$position = strpos( $file, 'wp-content' );
+		if ( $position !== false ) {
+			$file = substr( $file, $position );
+		}
+		$origin = $file . ':' . $root->getLine();
+		error_log( 'Media Cleaner: parser failure at ' . $origin . ' => ' . $root->getMessage() . "\n" . $root->getTraceAsString() );
+		return $origin;
 	}
 
 	public function guard_parser_query( $query ) {
@@ -692,14 +721,19 @@ class Meow_WPMC_Core {
 		 * hierarchical tree structure (an Abstract Syntax Tree).
 		 *
 		 * @param string $content The string containing the shortcodes.
+		 * @param int $depth Current recursion depth (internal).
+		 * @param string|null $plain Filled with everything that was written *outside* of the
+		 * shortcodes themselves (at any depth), concatenated. That text is not part of any
+		 * attribute, so the callers can run their usual HTML/content scan on it.
 		 * @return array An array of nodes, where each node can be a shortcode with its
 		 * own 'children' array, or a simple text node.
 		 */
-		function nested_shortcodes_to_array(string $content, $depth = 0): array
+		function nested_shortcodes_to_array(string $content, $depth = 0, &$plain = ''): array
 		{
 			if ( $depth > 32 ) {
 				return array();
 			}
+			
 			$nodes = [];
 			$last_pos = 0;
 
@@ -721,6 +755,7 @@ class Meow_WPMC_Core {
 								'type' => 'text',
 								'content' => $text_content
 							];
+							$plain .= $text_content . "\n";
 						}
 					}
 
@@ -747,7 +782,7 @@ class Meow_WPMC_Core {
 					// 3. This is the recursion!
 					// If there is inner content, parse it with the same function.
 					if ($inner_content !== null) {
-						$children = $this->nested_shortcodes_to_array( $inner_content, $depth + 1 );
+						$children = $this->nested_shortcodes_to_array( $inner_content, $depth + 1, $plain );
 						if (!empty($children)) {
 							$shortcode_node['children'] = $children;
 						}
@@ -768,6 +803,7 @@ class Meow_WPMC_Core {
 						'type' => 'text',
 						'content' => $text_content
 					];
+					$plain .= $text_content . "\n";
 				}
 			}
 
@@ -1091,13 +1127,16 @@ class Meow_WPMC_Core {
 	}
 	// Parse a meta, visit all the arrays, look for the attributes, fill $ids and $urls arrays
 	// If rawMode is enabled, it will not check if the value is an ID or an URL, it will just returns it in URLs
-	function get_from_meta( $meta, $lookFor, &$ids, &$urls, $rawMode = false, $depth = 0 ) {
+	function get_from_meta( $meta, $lookFor, &$ids, &$urls, $rawMode = false, $depth = 0, $array_keys = array() ) {
 		if ( $depth > 64 || ( !is_array( $meta ) && !is_object( $meta) ) ) {
 			return;
 		}
 		foreach ( $meta as $key => $value ) {
-			if ( is_object( $value ) || is_array( $value ) )
-				$this->get_from_meta( $value, $lookFor, $ids, $urls, $rawMode, $depth + 1 );
+
+			$should_dive_in_array = is_array( $value ) && !in_array( $key, $array_keys );
+			if ( is_object( $value ) || $should_dive_in_array ) {
+				$this->get_from_meta( $value, $lookFor, $ids, $urls, $rawMode, $depth + 1, $array_keys );
+			}
 			else if ( in_array( $key, $lookFor ) ) {
 				if ( empty( $value ) ) {
 					continue;
@@ -1108,6 +1147,16 @@ class Meow_WPMC_Core {
 				else if ( is_numeric( $value ) ) {
 					// It this an ID?
 					array_push( $ids, $value );
+				}
+				else if ( is_array( $value ) && in_array( $key, $array_keys ) ) {
+					// Is this an array of IDs, encoded as a string? (like "20,13")
+					foreach ( $value as $v ) {
+						if ( is_numeric( $v ) ) {
+							array_push( $ids, $v );
+						} else if ( $this->is_url( $v ) ) {
+							array_push( $urls, $this->clean_url( $v ) );
+						}
+					}
 				}
 				else {
 					if ( $this->is_url( $value ) ) {
@@ -1311,12 +1360,8 @@ class Meow_WPMC_Core {
 	}
 
 	private function protect_private_directory( $root ) {
-		$guards = array(
-			trailingslashit( $root ) . 'index.php' => "<?php\nhttp_response_code( 404 );\nexit;\n",
-			trailingslashit( $root ) . '.htaccess' => "Options -Indexes\n<IfModule mod_authz_core.c>Require all denied</IfModule>\n<IfModule !mod_authz_core.c>Deny from all</IfModule>\n",
-			trailingslashit( $root ) . 'web.config' => "<?xml version=\"1.0\"?><configuration><system.webServer><security><authorization><remove users=\"*\" roles=\"\" verbs=\"\"/><add accessType=\"Deny\" users=\"*\"/></authorization></security></system.webServer></configuration>",
-		);
-		foreach ( $guards as $path => $content ) {
+		foreach ( self::PRIVATE_GUARDS as $name => $content ) {
+			$path = trailingslashit( $root ) . $name;
 			if ( !file_exists( $path ) && @file_put_contents( $path, $content ) === false ) return false;
 		}
 		return true;
@@ -1529,6 +1574,27 @@ class Meow_WPMC_Core {
 		return true;
 	}
 
+	// One quarantined file, several claims on it. Every run copies the trash forward,
+	// so the same item is recorded again in each new run, and only the current run's
+	// row is ever shown or acted on. Recovering or permanently deleting touches that
+	// row alone, which leaves the older copies claiming a file that is no longer in
+	// quarantine — invisible, unreachable, and counted forever: they inflate the trash
+	// inventory, block the database reset, and keep the untracked-file sweep from ever
+	// running. So the moment an item leaves the trash, every claim on it goes with it.
+	// Matched inside the database against the row itself, since the values read into
+	// PHP have been stripslashed and cannot be compared back.
+	private function forget_stale_trash_rows( $id ) {
+		global $wpdb;
+		$table_name = $wpdb->prefix . "mclean_scan";
+		$wpdb->query( $wpdb->prepare(
+			"DELETE stale FROM $table_name AS stale
+			INNER JOIN $table_name AS live ON live.id = %d
+			WHERE stale.run_id != live.run_id AND stale.deleted = 1
+			AND stale.type = live.type AND stale.postId <=> live.postId AND stale.path = live.path",
+			(int) $id
+		) );
+	}
+
 	function recover( $id, $operation_manifest = array() ) {
 		$staged = $this->results_staged_error();
 		if ( $staged ) return $staged;
@@ -1543,6 +1609,8 @@ class Meow_WPMC_Core {
 			$identity = $this->validate_issue_manifest( $issue );
 			if ( is_wp_error( $identity ) ) return $identity;
 		}
+
+		$this->forget_stale_trash_rows( $id );
 
 		// Files
 		if ( $issue->type === 0 ) {
@@ -1909,6 +1977,8 @@ class Meow_WPMC_Core {
 				__( 'Media Cleaner needs the results of a completed scan from this version before it can delete anything. Run a scan first. Your trash is untouched and can still be recovered or emptied.', 'media-cleaner' ) );
 		}
 
+		$this->forget_stale_trash_rows( $id );
+
 		if ( $issue->type === 0 ) {
 			if ( $was_deleted ) {
 				$trash_path = $this->resolve_trash_path( $issue->path );
@@ -1995,20 +2065,19 @@ class Meow_WPMC_Core {
 		return new WP_Error( 'wpmc_issue_type_invalid', __( 'The selected Media Cleaner result has an unsupported type.', 'media-cleaner' ) );
 	}
 
+	// Empties the trash for good, in bounded batches the caller loops over: every file
+	// in quarantine, every attachment parked as a 'wmpc-trash' post, then every row
+	// marked deleted, whichever run recorded it. Nothing here validates an item first.
+	// That is the point: an item only reaches the trash because the user put it there,
+	// and per-item deletion refuses anything it can no longer recover — which is
+	// exactly the trash that has to be removable. When this finishes, the trash is
+	// empty and its counter is zero.
 	function force_trash( $initialize = false, $limit = 100 ) {
 		global $wpdb;
 		$staged = $this->results_staged_error();
 		if ( $staged ) return $staged;
 		$run_id = $this->get_run_id();
 		$table_name = $wpdb->prefix . 'mclean_scan';
-		$tracked_items = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $table_name WHERE run_id = %d AND deleted = 1", $run_id ) );
-		if ( $tracked_items > 0 ) {
-			return new WP_Error(
-				'wpmc_force_trash_has_tracked_items',
-				__( 'Retry the tracked trash items individually before removing untracked quarantine files.', 'media-cleaner' ),
-				array( 'status' => 409 )
-			);
-		}
 		$phase = 'cleanuptrash';
 		$limit = max( 1, min( 100, (int) $limit ) );
 		$trash = $this->ensure_trash_directory();
@@ -2025,7 +2094,27 @@ class Meow_WPMC_Core {
 
 		$work = $this->runs->next_work( $run_id, $phase );
 		if ( !$work ) {
-			$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM $table_name WHERE run_id = %d AND deleted = 1", $run_id ) );
+			// The quarantine directory is empty now, so what is left is bookkeeping.
+			// First the attachments that were parked as 'wmpc-trash' posts: their files
+			// are already gone, and nothing but this can reach them once the normal
+			// per-item delete refuses to recover them. Bounded like the file batches.
+			$parked = $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM $wpdb->posts WHERE post_type = 'wmpc-trash' LIMIT %d", $limit ) );
+			if ( !empty( $parked ) ) {
+				foreach ( $parked as $post_id ) {
+					if ( !wp_delete_post( (int) $post_id, true ) ) {
+						return new WP_Error( 'wpmc_trash_post_delete_failed', __( 'A trashed attachment record could not be removed.', 'media-cleaner' ) );
+					}
+				}
+				return array(
+					'finished' => false,
+					'processed' => count( $parked ),
+					'pending' => (int) $wpdb->get_var( "SELECT COUNT(*) FROM $wpdb->posts WHERE post_type = 'wmpc-trash'" ),
+				);
+			}
+			// Then every trash row, whichever run recorded it: each run copies the trash
+			// forward, so the older rows are duplicates of what was just removed, and a
+			// row kept here would point at a file that no longer exists.
+			$deleted = $wpdb->query( "DELETE FROM $table_name WHERE deleted = 1" );
 			if ( $deleted === false ) {
 				return new WP_Error( 'wpmc_trash_database_failed', __( 'Trash files were removed, but Media Cleaner could not update its result records.', 'media-cleaner' ) );
 			}
@@ -2045,8 +2134,15 @@ class Meow_WPMC_Core {
 		try {
 			$iterator = new FilesystemIterator( $directory, FilesystemIterator::SKIP_DOTS );
 			foreach ( $iterator as $entry ) {
+				// A symbolic link is unlinked as itself and never followed, so whatever
+				// it points at outside the quarantine is left alone.
 				if ( $entry->isLink() ) {
-					throw new RuntimeException( __( 'Media Cleaner will not remove a symbolic link from trash.', 'media-cleaner' ) );
+					if ( !@unlink( $entry->getPathname() ) ) {
+						throw new RuntimeException( sprintf( __( 'The trash entry %s could not be removed.', 'media-cleaner' ), $entry->getFilename() ) );
+					}
+					$processed++;
+					if ( $processed >= $limit ) break;
+					continue;
 				}
 				if ( $entry->isDir() ) {
 					$child = ltrim( $relative . '/' . $entry->getFilename(), '/' );
@@ -2098,48 +2194,192 @@ class Meow_WPMC_Core {
 		);
 	}
 
-	// A last resort for trash items that can no longer be emptied the normal way:
-	// their file has disappeared, changed, or become unsafe since the scan, so
-	// validate_issue_manifest() refuses them and the row stays stuck in the trash
-	// with the "run a new scan" error. This removes exactly those broken rows (and
-	// any physical file still sitting in quarantine), and leaves healthy, still
-	// recoverable trash untouched. It is safe precisely because it only acts on
-	// items whose backing file is already gone or unverifiable. Returns the count.
-	function force_clean_trash() {
+	// A last resort for trash items that can no longer be emptied the normal way. Two
+	// things put an item there: it can no longer be verified (its file changed or
+	// became unsafe since the scan, so validate_issue_manifest() refuses it), or none
+	// of its files are in quarantine any more. The second is the one that traps whole
+	// libraries: emptying a trashed attachment recovers it first, and recovery has
+	// nothing to move back, so every attempt fails and the row never goes away.
+	//
+	// Rows that are still recoverable — their files are in quarantine and verify — are
+	// left alone. Once no row claims them, the files left in the trash go too.
+	//
+	// The records themselves are cheap: one query per batch. What costs time is the
+	// attachments parked as 'wmpc-trash' posts, which WordPress deletes one at a time
+	// with their metadata. That is why this is bounded and returns a cursor for the
+	// caller to loop on. Returns array( 'rows', 'examined', 'files', 'cursor', 'finished' ).
+	function force_clean_trash( $cursor = 0, $limit = 100 ) {
 		$staged = $this->results_staged_error();
 		if ( $staged ) return $staged;
 		global $wpdb;
 		$table_name = $wpdb->prefix . 'mclean_scan';
-		$run_id = $this->get_run_id();
-		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM $table_name WHERE run_id = %d AND deleted = 1", $run_id ) );
+		$cursor = max( 0, (int) $cursor );
+		$limit = max( 1, min( 500, (int) $limit ) );
+		// Asked once per batch instead of once per row: an empty quarantine means no
+		// row can be recovered, so there is nothing to look up on disk at all.
+		$recoverable_possible = $this->quarantine_has_entries();
+		// The whole trash, not one run's view of it: the trash belongs to the user, and
+		// a stuck row left behind by an older run is exactly what nothing else reaches.
+		// The join answers "is this attachment still parked?" for the whole batch.
+		$rows = $wpdb->get_results( $wpdb->prepare(
+			"SELECT scan.*, posts.post_type AS parked_type
+			FROM $table_name AS scan
+			LEFT JOIN $wpdb->posts AS posts ON posts.ID = scan.postId
+			WHERE scan.deleted = 1 AND scan.id > %d ORDER BY scan.id ASC LIMIT %d", $cursor, $limit
+		) );
 		if ( $rows === null ) {
 			return new WP_Error( 'wpmc_force_clean_trash_failed', __( 'Media Cleaner could not read the trash records.', 'media-cleaner' ) );
 		}
-		$removed = 0;
+		$doomed = array();
 		foreach ( $rows as $issue ) {
-			// Only the items that cannot be cleaned normally: a healthy trash item
-			// validates fine and is left recoverable.
-			if ( !is_wp_error( $this->validate_issue_manifest( $issue ) ) ) continue;
-
-			// Best effort: drop any file still physically in quarantine, then the row.
-			// Directories and symlinks are never removed, and a missing or unsafe path
-			// is skipped rather than fatal — the point is to unstick the record.
-			$manifest = json_decode( (string) $issue->manifest, true );
-			$relatives = is_array( $manifest ) ? array_keys( $manifest ) : array();
-			if ( empty( $relatives ) && (int) $issue->type === 0 ) {
-				$relatives[] = preg_replace( '/\s\(\+.*$/', '', (string) $issue->path );
-			}
-			foreach ( $relatives as $relative ) {
-				$trash_path = $this->resolve_trash_path( $relative );
-				if ( is_wp_error( $trash_path ) ) continue;
-				if ( file_exists( $trash_path ) && !is_dir( $trash_path ) && !is_link( $trash_path ) ) {
-					@unlink( $trash_path );
+			$cursor = (int) $issue->id;
+			if ( $recoverable_possible ) {
+				$relatives = $this->trash_relatives( $issue );
+				// Healthy trash: its files are still in quarantine and still verify. That
+				// is the only kind that can be given back, and it is left untouched.
+				if ( $this->quarantine_holds( $relatives ) && !is_wp_error( $this->validate_issue_manifest( $issue ) ) ) continue;
+				// Best effort: drop whatever is still physically in quarantine. Directories
+				// and symlinks are never removed, and a missing or unsafe path is skipped
+				// rather than fatal — the point is to unstick the record.
+				foreach ( $relatives as $relative ) {
+					$trash_path = $this->resolve_trash_path( $relative );
+					if ( is_wp_error( $trash_path ) ) continue;
+					if ( file_exists( $trash_path ) && !is_dir( $trash_path ) && !is_link( $trash_path ) ) {
+						@unlink( $trash_path );
+					}
 				}
 			}
-			if ( $wpdb->query( $wpdb->prepare( "DELETE FROM $table_name WHERE id = %d", $issue->id ) ) !== false ) {
-				$removed++;
+			// The attachment parked as a 'wmpc-trash' post goes with it. Its files are
+			// gone, so the record can only ever be a broken media item, and nothing in
+			// the media library reaches that post type. A post that is a real attachment
+			// again was recovered outside of this and is never touched.
+			if ( $issue->parked_type === 'wmpc-trash' ) {
+				wp_delete_post( (int) $issue->postId, true );
+			}
+			$doomed[] = (int) $issue->id;
+		}
+		if ( !empty( $doomed ) ) {
+			$placeholders = implode( ',', array_fill( 0, count( $doomed ), '%d' ) );
+			if ( $wpdb->query( $wpdb->prepare( "DELETE FROM $table_name WHERE id IN ($placeholders)", $doomed ) ) === false ) {
+				return new WP_Error( 'wpmc_force_clean_trash_failed', __( 'Media Cleaner could not remove the trash records.', 'media-cleaner' ) );
 			}
 		}
+		$finished = count( $rows ) < $limit;
+		return array(
+			'rows' => count( $doomed ),
+			'examined' => count( $rows ),
+			'files' => $finished ? $this->sweep_untracked_trash_files() : 0,
+			'cursor' => $cursor,
+			'finished' => $finished,
+		);
+	}
+
+	// The files an item put in quarantine: what the manifest recorded, or failing that
+	// the path itself for a file, and the attachment's own files for a media item.
+	private function trash_relatives( $issue ) {
+		$manifest = json_decode( (string) $issue->manifest, true );
+		$relatives = is_array( $manifest ) ? array_keys( $manifest ) : array();
+		if ( !empty( $relatives ) ) return $relatives;
+		if ( (int) $issue->type === 0 ) {
+			return array( preg_replace( '/\s\(\+.*$/', '', (string) $issue->path ) );
+		}
+		return $this->get_paths_from_attachment( (int) $issue->postId );
+	}
+
+	// Whether the quarantine holds anything at all. This is the one question worth
+	// asking before looking at rows: with an empty trash directory there is nothing to
+	// give back, so every trash row is stuck and none of them needs examining.
+	private function quarantine_has_entries() {
+		$found = false;
+		$this->walk_trash( function() use ( &$found ) {
+			$found = true;
+			return false;
+		} );
+		return $found;
+	}
+
+	// Whether anything of the item is still in the trash. Nothing there means nothing
+	// to recover: recover() would have no file to move back, so the item is stuck.
+	private function quarantine_holds( $relatives ) {
+		foreach ( $relatives as $relative ) {
+			$trash_path = $this->resolve_trash_path( $relative );
+			if ( !is_wp_error( $trash_path ) && file_exists( $trash_path ) ) return true;
+		}
+		return false;
+	}
+
+	// The single walk over the quarantine, so counting it and clearing it can never
+	// disagree about what it holds. $file is called with every entry that is not a
+	// directory, guards excluded; $directory with every directory, deepest first.
+	// Links are entries of their own and are never followed. Returning false from
+	// $file stops the walk, so a caller that only needs to know whether anything is
+	// there does not pay for the whole tree.
+	private function walk_trash( $file, $directory = null ) {
+		$trash = $this->ensure_trash_directory();
+		if ( is_wp_error( $trash ) ) return $trash;
+		$root = untrailingslashit( wp_normalize_path( $trash ) );
+		try {
+			$iterator = new RecursiveIteratorIterator(
+				new RecursiveDirectoryIterator( $trash, FilesystemIterator::SKIP_DOTS ),
+				RecursiveIteratorIterator::CHILD_FIRST
+			);
+			foreach ( $iterator as $entry ) {
+				if ( !$entry->isLink() && $entry->isDir() ) {
+					if ( $directory ) $directory( $entry );
+					continue;
+				}
+				if ( dirname( wp_normalize_path( $entry->getPathname() ) ) === $root
+					&& array_key_exists( $entry->getFilename(), self::PRIVATE_GUARDS ) ) continue;
+				if ( $file( $entry ) === false ) return true;
+			}
+		}
+		catch ( Throwable $e ) {
+			return new WP_Error( 'wpmc_trash_unreadable', __( 'Media Cleaner could not read its trash directory completely.', 'media-cleaner' ) );
+		}
+		return true;
+	}
+
+	// What the trash holds right now, on both sides: the rows that claim something and
+	// the files actually sitting in quarantine. Nothing is touched — this is what the
+	// cleanup screen shows before the user decides, and again after.
+	public function trash_inventory() {
+		global $wpdb;
+		$table_name = $wpdb->prefix . 'mclean_scan';
+		$files = 0;
+		$size = 0;
+		$walked = $this->walk_trash( function( $entry ) use ( &$files, &$size ) {
+			$files++;
+			if ( !$entry->isLink() && $entry->isFile() ) $size += (int) $entry->getSize();
+		} );
+		if ( is_wp_error( $walked ) ) return $walked;
+		return array(
+			'rows' => (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table_name WHERE deleted = 1" ),
+			'posts' => (int) $wpdb->get_var( "SELECT COUNT(*) FROM $wpdb->posts WHERE post_type = 'wmpc-trash'" ),
+			'files' => $files,
+			'size' => $size,
+		);
+	}
+
+	// Once no row anywhere claims a trashed file, whatever is left in quarantine
+	// belongs to nobody: nothing lists it, nothing can recover it, and the normal
+	// Empty Trash is never even offered (the dashboard proposes it only when the
+	// trash count is above zero). So this is the only place those files can go.
+	// It runs strictly when the table tracks nothing, which is what makes it safe.
+	private function sweep_untracked_trash_files() {
+		global $wpdb;
+		$table_name = $wpdb->prefix . 'mclean_scan';
+		if ( (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table_name WHERE deleted = 1" ) > 0 ) return 0;
+		$removed = 0;
+		// Best effort: an unreadable corner of the trash leaves the rest cleared rather
+		// than turning a last resort into an error, so the walk's verdict is ignored.
+		$this->walk_trash(
+			function( $entry ) use ( &$removed ) {
+				if ( @unlink( $entry->getPathname() ) ) $removed++;
+			},
+			function( $entry ) {
+				@rmdir( $entry->getPathname() );
+			}
+		);
 		return $removed;
 	}
 
@@ -3392,7 +3632,7 @@ class Meow_WPMC_Core {
 			'uploads_file_buffer' => array( 10, 1000 ),
 			'delay' => array( 0, 10000 ),
 			'refs_buffer' => array( 10, 1000 ),
-			'posts_per_page' => array( 5, 100 ),
+			'posts_per_page' => array( 5, 1000 ),
 		);
 	}
 

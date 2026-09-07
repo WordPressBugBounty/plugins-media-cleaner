@@ -610,14 +610,56 @@ class Meow_WPMC_Runs {
 	}
 
 	/**
+	 * The escape hatch behind the Unlock Cleanup button: the results on screen are
+	 * declared current by hand. It clears the two things cleanup_allowed() refuses on
+	 * — a staged run nobody stopped, and a version stamp from another release — and
+	 * never invents a completed run: if there is none, a scan is still required.
+	 */
+	public function force_cleanup_allowed() {
+		global $wpdb;
+		$resumable = $this->get_resumable();
+		while ( $resumable ) {
+			$cancelled = $this->cancel( (int) $resumable->id );
+			if ( is_wp_error( $cancelled ) ) return $cancelled;
+			$next = $this->get_resumable();
+			// Guard against a row that refuses to leave 'running': the loop must end.
+			if ( $next && (int) $next->id === (int) $resumable->id ) {
+				return new WP_Error( 'wpmc_run_cancel_failed', __( 'Media Cleaner could not stop the staged scan.', 'media-cleaner' ) );
+			}
+			$resumable = $next;
+		}
+		$run = $this->get( $this->get_active_id() );
+		if ( !$run || $run->status !== 'completed' ) {
+			return new WP_Error( 'wpmc_no_completed_run', __( 'There are no published results to unlock. Run a scan first.', 'media-cleaner' ), array( 'status' => 409 ) );
+		}
+		$counters = $this->decode_json( $run->counters );
+		$counters['version'] = WPMC_VERSION;
+		$updated = $wpdb->update(
+			$this->table( 'runs' ),
+			array( 'counters' => wp_json_encode( $counters ), 'updated_at' => current_time( 'mysql', true ) ),
+			array( 'id' => (int) $run->id ),
+			array( '%s', '%s' ),
+			array( '%d' )
+		);
+		if ( $updated === false ) {
+			return new WP_Error( 'wpmc_run_unlock_failed', __( 'Media Cleaner could not unlock the results.', 'media-cleaner' ), array( 'database_error' => $wpdb->last_error ) );
+		}
+		return true;
+	}
+
+	/**
 	 * The same answer as cleanup_allowed(), with the run behind it, so the screen can
 	 * say which scan it is waiting on instead of only that it is waiting.
 	 */
 	public function cleanup_status() {
 		$summary = function( $r ) {
 			if ( !$r ) return null;
+			$counters = $this->decode_json( $r->counters );
 			return array(
 				'id' => (int) $r->id,
+				// Which version analysed the site: a completed run that is still refused
+				// was made by another one, and the screen has to be able to say so.
+				'version' => isset( $counters['version'] ) ? (string) $counters['version'] : '',
 				'method' => $r->method,
 				'status' => $r->status,
 				'created_at' => $r->created_at,

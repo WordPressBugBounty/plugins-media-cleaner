@@ -116,6 +116,11 @@ class Meow_WPMC_Rest
 				'permission_callback' => array( $this->core, 'can_access_features' ),
 				'callback' => array( $this, 'rest_force_clean_trash' )
 			) );
+			register_rest_route( $this->namespace, '/trash_inventory', array(
+				'methods' => 'GET',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_trash_inventory' )
+			) );
 			register_rest_route( $this->namespace, '/recover', array(
 				'methods' => 'POST',
 				'permission_callback' => array( $this->core, 'can_access_features' ),
@@ -167,6 +172,14 @@ class Meow_WPMC_Rest
 				'methods' => 'POST',
 				'permission_callback' => array( $this->core, 'can_access_features' ),
 				'callback' => array( $this, 'rest_retrieve_hash_duplicates' )
+			) );
+			register_rest_route( $this->namespace, '/duplicates_group', array(
+				'methods' => 'GET',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_duplicates_group' ),
+				'args' => array(
+					'id' => array( 'required' => true ),
+				)
 			) );
 			register_rest_route( $this->namespace, '/check_targets', array(
 				'methods' => 'POST',
@@ -227,6 +240,11 @@ class Meow_WPMC_Rest
 					'methods' => 'POST',
 					'permission_callback' => array( $this->core, 'can_access_features' ),
 					'callback' => array( $this, 'rest_run_cancel' )
+				) );
+				register_rest_route( $this->namespace, '/run/unlock_cleanup', array(
+					'methods' => 'POST',
+					'permission_callback' => array( $this->core, 'can_access_features' ),
+					'callback' => array( $this, 'rest_run_unlock_cleanup' )
 				) );
 
 				register_rest_route( $this->namespace, '/trash_preview', array(
@@ -566,6 +584,17 @@ class Meow_WPMC_Rest
 		return new WP_REST_Response( array( 'success' => true, 'data' => array( 'run' => $this->core->runs->to_array( $this->core->runs->get( $run_id ) ) ) ), 200 );
 	}
 
+	function rest_run_unlock_cleanup() {
+		$result = $this->core->runs->force_cleanup_allowed();
+		if ( is_wp_error( $result ) ) {
+			return $this->error_response( $result );
+		}
+		return new WP_REST_Response( array( 'success' => true, 'data' => array(
+			'cleanup_allowed' => $this->core->runs->cleanup_allowed(),
+			'cleanup_status' => $this->core->runs->cleanup_status(),
+		) ), 200 );
+	}
+
 	function rest_preflight() {
 		$checks = array();
 		$blocked = false;
@@ -764,14 +793,28 @@ class Meow_WPMC_Rest
 		$limit = isset( $params['limit'] ) ? absint( $params['limit'] ) : 100;
 		$limit = max( 1, min( 100, $limit ) );
 		$ids = [];
+		// The progress bar needs the size of the whole selection, so it is counted
+		// on the first page only: later pages see a set already shrunk by whatever
+		// was processed, and would make the bar go backwards.
+		$total = null;
+		$first_page = ( $cursor === 0 );
 		if ( $src === 'issues' ) {
 			$ids = $repair_mode ? $this->core->get_repair_ids( $search, $cursor, $limit ) : $this->get_issues_ids( $search, $cursor, $limit );
+			if ( $first_page ) {
+				$total = $repair_mode ? (int) $this->core->get_count_of_issues_to_repair( $search ) : $this->count_issues( $search );
+			}
 		}
 		else if ( $src === 'ignored' ) {
 			$ids = $this->get_ignored_ids( $search, $cursor, $limit );
+			if ( $first_page ) {
+				$total = $this->count_ignored( $search );
+			}
 		}
 		else if ( $src === 'trash' ) {
 			$ids = $this->get_trash_ids( $search, $cursor, $limit );
+			if ( $first_page ) {
+				$total = $this->count_trash( $search );
+			}
 		}
 		else {
 			return $this->error_response( new WP_Error(
@@ -787,6 +830,7 @@ class Meow_WPMC_Rest
 			'pagination' => array(
 				'cursor' => $next_cursor,
 				'finished' => count( $ids ) < $limit,
+				'total' => $total,
 			),
 		), 200 );
 	}
@@ -1498,11 +1542,9 @@ class Meow_WPMC_Rest
 		}
 		global $wpdb;
 		$table_scan = $wpdb->prefix . 'mclean_scan';
-		$active_run_id = $this->core->runs->get_active_id();
-		$trashed = (int) $wpdb->get_var( $wpdb->prepare(
-			"SELECT COUNT(*) FROM $table_scan WHERE run_id = %d AND deleted = 1",
-			$active_run_id
-		) );
+		// Any trash at all, from any run: resetting the tables would otherwise strand
+		// those files in quarantine with no record left to recover them.
+		$trashed = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table_scan WHERE deleted = 1" );
 		if ( $trashed > 0 ) {
 			return $this->error_response( new WP_Error( 'wpmc_reset_trash_not_empty', __( 'Recover or permanently delete every quarantined item before resetting the database.', 'media-cleaner' ), array( 'status' => 409, 'trash_count' => $trashed ) ) );
 		}
@@ -1708,6 +1750,173 @@ class Meow_WPMC_Rest
 		return new WP_REST_Response( [ 'success' => true, 'data' => $entries, 'total' => $total ], 200 );
 	}
 
+	/**
+	 * Returns every copy of the duplicate group an issue belongs to.
+	 *
+	 * The scan reports each copy on its own row, which is honest but not enough to decide: two
+	 * identical files can both be in use, in two different places. The dashboard needs the whole
+	 * group at once, with where each copy is used, before anything is trashed.
+	 */
+	function rest_duplicates_group( $request ) {
+		global $wpdb;
+		$id = (int) $request->get_param( 'id' );
+		$run_id = $this->core->get_run_id();
+		$table_scan = $wpdb->prefix . 'mclean_scan';
+		$table_refs = $wpdb->prefix . 'mclean_refs';
+
+		$entry = $wpdb->get_row( $wpdb->prepare(
+			"SELECT id, path FROM $table_scan WHERE run_id = %d AND id = %d LIMIT 1",
+			$run_id, $id
+		) );
+		if ( !$entry ) {
+			return $this->error_response( new WP_Error( 'wpmc_issue_not_found',
+				__( 'This item is not part of the current results.', 'media-cleaner' ),
+				array( 'status' => 404 ) ) );
+		}
+
+		// The group is keyed by the content hash the duplicate analysis stored as a reference.
+		$hash = $wpdb->get_var( $wpdb->prepare(
+			"SELECT originType FROM $table_refs
+			WHERE run_id = %d AND mediaUrl_hash = %s AND mediaUrl = %s AND originType LIKE 'HASH:%%'
+			LIMIT 1",
+			$run_id, hash( 'sha256', $entry->path ), $entry->path
+		) );
+		if ( !$hash ) {
+			return $this->error_response( new WP_Error( 'wpmc_duplicate_hash_missing',
+				__( 'This file was not hashed by the current scan, so its copies cannot be compared. Run a Duplicates scan.', 'media-cleaner' ),
+				array( 'status' => 404 ) ) );
+		}
+
+		// Hash references are URL references, so their mediaId column is NULL: the duplicate analysis
+		// stores the media ID in origin. Same read as check_duplicates(), so both agree on the group.
+		$copies = $wpdb->get_results( $wpdb->prepare(
+			"SELECT mediaUrl, MAX(origin) AS mediaId FROM $table_refs
+			WHERE run_id = %d AND originType = %s AND mediaUrl IS NOT NULL
+			GROUP BY mediaUrl
+			ORDER BY mediaUrl ASC",
+			$run_id, $hash
+		) );
+
+		$results = array();
+		foreach ( $copies as $copy ) {
+			$results[] = $this->build_duplicate_copy( (string) $copy->mediaUrl, (int) $copy->mediaId, $run_id );
+		}
+
+		return new WP_REST_Response( array(
+			'success' => true,
+			'data' => array(
+				'hash' => substr( (string) $hash, 5 ),
+				'currentId' => (int) $entry->id,
+				'copies' => $results,
+			),
+		), 200 );
+	}
+
+	// One copy of a duplicate group, described well enough for a human to pick which one stays.
+	private function build_duplicate_copy( $path, $media_id, $run_id ) {
+		global $wpdb;
+		$table_scan = $wpdb->prefix . 'mclean_scan';
+		$table_refs = $wpdb->prefix . 'mclean_refs';
+
+		if ( $media_id < 1 ) {
+			$media_id = (int) $this->core->find_media_id_from_file( $path, false );
+		}
+
+		$filepath = trailingslashit( $this->core->upload_path ) . $path;
+		$exists = file_exists( $filepath );
+
+		$copy = array(
+			'path' => $path,
+			'mediaId' => $media_id > 0 ? $media_id : null,
+			'title' => null,
+			'editUrl' => null,
+			'thumbnailUrl' => null,
+			'imageUrl' => trailingslashit( $this->core->upload_url ) . $path,
+			'size' => $exists ? (int) filesize( $filepath ) : 0,
+			'exists' => $exists,
+			'dimensions' => null,
+			'uploadedAt' => null,
+			'attachedTo' => null,
+			'issueId' => null,
+			'ignored' => false,
+			'deleted' => false,
+			'referenceCount' => 0,
+			'references' => array(),
+		);
+
+		if ( $media_id > 0 ) {
+			$attachment = get_post( $media_id );
+			if ( $attachment ) {
+				$copy['title'] = html_entity_decode( get_the_title( $media_id ) );
+				$copy['editUrl'] = get_edit_post_link( $media_id, 'raw' );
+				$copy['uploadedAt'] = $attachment->post_date;
+				if ( (int) $attachment->post_parent > 0 ) {
+					$copy['attachedTo'] = array(
+						'id' => (int) $attachment->post_parent,
+						'title' => html_entity_decode( get_the_title( $attachment->post_parent ) ),
+						'editUrl' => get_edit_post_link( $attachment->post_parent, 'raw' ),
+					);
+				}
+			}
+			$src = wp_get_attachment_image_src( $media_id, 'medium' );
+			if ( !empty( $src ) ) {
+				$copy['thumbnailUrl'] = $src[0];
+			}
+			$meta = wp_get_attachment_metadata( $media_id );
+			if ( is_array( $meta ) && !empty( $meta['width'] ) && !empty( $meta['height'] ) ) {
+				$copy['dimensions'] = (int) $meta['width'] . ' × ' . (int) $meta['height'];
+			}
+		}
+		if ( empty( $copy['thumbnailUrl'] ) ) {
+			$ext = pathinfo( $path, PATHINFO_EXTENSION );
+			$copy['thumbnailUrl'] = $this->core->is_image_extension( $ext ) ? $copy['imageUrl'] : null;
+		}
+		if ( empty( $copy['title'] ) ) {
+			$copy['title'] = basename( $path );
+		}
+
+		// The issue row, when this copy is one of the current results. Without it the modal can
+		// only show the copy, not act on it.
+		$issue = $wpdb->get_row( $wpdb->prepare(
+			"SELECT id, ignored, deleted FROM $table_scan
+			WHERE run_id = %d AND path_hash = %s AND path = %s
+			ORDER BY ( issue = 'DUPLICATE' ) DESC, id DESC LIMIT 1",
+			$run_id, hash( 'sha256', $path ), $path
+		) );
+		if ( $issue ) {
+			$copy['issueId'] = (int) $issue->id;
+			$copy['ignored'] = (bool) (int) $issue->ignored;
+			$copy['deleted'] = (bool) (int) $issue->deleted;
+		}
+
+		// Where this copy is used. Same test as the duplicate analysis itself, so the modal can
+		// never disagree with the issue it was opened from.
+		$where = $wpdb->prepare(
+			"FROM $table_refs
+			WHERE run_id = %d AND originType NOT LIKE 'HASH:%%'
+			AND ((%d > 0 AND mediaId = %d) OR (mediaUrl_hash = %s AND mediaUrl = %s))",
+			$run_id, $media_id, $media_id, hash( 'sha256', $path ), $path
+		);
+		$copy['referenceCount'] = (int) $wpdb->get_var( "SELECT COUNT(*) $where" );
+		if ( $copy['referenceCount'] > 0 ) {
+			$references = $wpdb->get_results( "SELECT originType, origin $where ORDER BY id ASC LIMIT 20" );
+			foreach ( $references as $reference ) {
+				$origin = (string) $reference->origin;
+				$post_id = is_numeric( $origin ) ? (int) $origin : 0;
+				$post = $post_id > 0 ? get_post( $post_id ) : null;
+				$copy['references'][] = array(
+					'originType' => stripslashes( (string) $reference->originType ),
+					'origin' => $origin,
+					'postId' => $post ? $post->ID : null,
+					'postTitle' => $post ? html_entity_decode( $post->post_title ) : null,
+					'editUrl' => $post ? get_edit_post_link( $post->ID, 'raw' ) : null,
+				);
+			}
+		}
+
+		return $copy;
+	}
+
 	function rest_entries( $request ) {
 		global $wpdb;
 		$limit = max( 1, min( 100, (int) $request->get_param('limit') ) );
@@ -1740,7 +1949,7 @@ class Meow_WPMC_Rest
 			$filter_sql = isset( $filters[ $filterBy ] ) ? $filters[ $filterBy ] : $filters['all'];
 			$total = $filterBy === 'issues' ? $this->count_issues( $search ) : ( $filterBy === 'ignored' ? $this->count_ignored( $search ) : ( $filterBy === 'trash' ? $this->count_trash( $search ) : 0 ) );
 
-			$allowed_order = array( 'id', 'type', 'postId', 'time', 'path', 'size' );
+			$allowed_order = array( 'id', 'type', 'postId', 'time', 'path', 'size', 'issue' );
 			$order_column = in_array( $orderBy, $allowed_order, true ) ? $orderBy : 'id';
 			$order_direction = $order === 'asc' ? 'ASC' : 'DESC';
 			$search_sql = empty( $search ) ? '' : $wpdb->prepare( 'AND path LIKE %s', '%' . $wpdb->esc_like( $search ) . '%' );
@@ -1809,7 +2018,68 @@ class Meow_WPMC_Rest
 			}
 		}
 
+		$this->attach_duplicate_counts( $entries, $run_id );
+
 		return new WP_REST_Response( [ 'success' => true, 'data' => $entries, 'total' => $total ], 200 );
+	}
+
+	/**
+	 * Tells each duplicate row how many copies it shares its content with, in two queries for the
+	 * whole page. A duplicate on its own line means nothing; the size of its group is the first
+	 * thing the user needs to see.
+	 */
+	private function attach_duplicate_counts( $entries, $run_id ) {
+		global $wpdb;
+		$paths = array();
+		foreach ( $entries as $entry ) {
+			if ( isset( $entry->issue ) && $entry->issue === 'DUPLICATE' ) {
+				$paths[ $entry->path ] = true;
+			}
+		}
+		if ( empty( $paths ) ) {
+			return;
+		}
+
+		$table_refs = $wpdb->prefix . 'mclean_refs';
+		$paths = array_keys( $paths );
+		$hash_placeholders = implode( ', ', array_fill( 0, count( $paths ), '%s' ) );
+		$path_hashes = array_map( function( $path ) { return hash( 'sha256', $path ); }, $paths );
+		$rows = $wpdb->get_results( $wpdb->prepare(
+			"SELECT mediaUrl, originType FROM $table_refs
+			WHERE run_id = %d AND originType LIKE 'HASH:%%' AND mediaUrl_hash IN ( $hash_placeholders )",
+			array_merge( array( $run_id ), $path_hashes )
+		) );
+
+		$hash_by_path = array();
+		$hashes = array();
+		foreach ( $rows as $row ) {
+			$hash_by_path[ $row->mediaUrl ] = $row->originType;
+			$hashes[ $row->originType ] = true;
+		}
+		if ( empty( $hashes ) ) {
+			return;
+		}
+
+		$hashes = array_keys( $hashes );
+		$origin_placeholders = implode( ', ', array_fill( 0, count( $hashes ), '%s' ) );
+		$counts = $wpdb->get_results( $wpdb->prepare(
+			"SELECT originType, COUNT(DISTINCT mediaUrl) AS copies FROM $table_refs
+			WHERE run_id = %d AND originType IN ( $origin_placeholders )
+			GROUP BY originType",
+			array_merge( array( $run_id ), $hashes )
+		) );
+		$copies_by_hash = array();
+		foreach ( $counts as $count ) {
+			$copies_by_hash[ $count->originType ] = (int) $count->copies;
+		}
+
+		foreach ( $entries as $entry ) {
+			if ( !isset( $entry->issue ) || $entry->issue !== 'DUPLICATE' ) {
+				continue;
+			}
+			$hash = isset( $hash_by_path[ $entry->path ] ) ? $hash_by_path[ $entry->path ] : null;
+			$entry->duplicates_count = $hash && isset( $copies_by_hash[ $hash ] ) ? $copies_by_hash[ $hash ] : 0;
+		}
 	}
 
 	// Nothing here waits for a scan. Only trashing something new does, and delete()
@@ -1956,23 +2226,53 @@ class Meow_WPMC_Rest
 		), 200 );
 	}
 
-	// A last resort for stuck trash rows whose file has vanished, changed, or become
-	// unsafe since the scan, so the normal Empty Trash refuses them. It removes only
-	// those broken rows (and any file left in quarantine); healthy, still recoverable
-	// trash is left untouched. Emptying the trash needs no scan.
-	function rest_force_clean_trash() {
-		$deleted = $this->core->force_clean_trash();
-		if ( is_wp_error( $deleted ) ) return $this->error_response( $deleted );
+	// What the trash holds, so the cleanup screen can show it before anything is
+	// removed, and again afterwards. Reading it needs no scan and changes nothing.
+	function rest_trash_inventory() {
+		$inventory = $this->core->trash_inventory();
+		if ( is_wp_error( $inventory ) ) return $this->error_response( $inventory );
+		return new WP_REST_Response( array( 'success' => true, 'data' => $inventory ), 200 );
+	}
+
+	// A last resort for trash rows that can no longer be emptied the normal way: their
+	// files are gone from quarantine, or can no longer be verified. It removes only
+	// those; healthy, still recoverable trash is left untouched. Emptying the trash
+	// needs no scan. Bounded per request — the caller loops on the returned cursor.
+	function rest_force_clean_trash( $request ) {
+		$params = $this->request_json( $request );
+		$cursor = isset( $params['cursor'] ) ? (int) $params['cursor'] : 0;
+		$result = $this->core->force_clean_trash( $cursor );
+		if ( is_wp_error( $result ) ) return $this->error_response( $result );
+		$rows = (int) $result['rows'];
+		$files = (int) $result['files'];
+		$messages = array();
+		if ( $rows > 0 ) {
+			$messages[] = sprintf(
+				/* translators: %d is the number of stuck trash items that were removed. */
+				_n( '%d stuck trash item was removed.', '%d stuck trash items were removed.', $rows, 'media-cleaner' ),
+				$rows
+			);
+		}
+		if ( $files > 0 ) {
+			$messages[] = sprintf(
+				/* translators: %d is the number of files that were left in the trash directory without any record. */
+				_n( '%d leftover file was removed from the trash directory.', '%d leftover files were removed from the trash directory.', $files, 'media-cleaner' ),
+				$files
+			);
+		}
+		if ( empty( $messages ) ) {
+			$messages[] = __( 'No stuck trash items were found. Your trash is already clean.', 'media-cleaner' );
+		}
 		return new WP_REST_Response( array(
 			'success' => true,
-			'data' => array( 'deleted' => $deleted ),
-			'message' => $deleted > 0
-				? sprintf(
-					/* translators: %d is the number of broken trash items that were removed. */
-					_n( '%d stuck trash item was removed.', '%d stuck trash items were removed.', $deleted, 'media-cleaner' ),
-					$deleted
-				)
-				: __( 'No stuck trash items were found. Your trash is already clean.', 'media-cleaner' ),
+			'data' => array(
+				'deleted' => $rows,
+				'examined' => (int) $result['examined'],
+				'files' => $files,
+				'cursor' => (int) $result['cursor'],
+				'finished' => (bool) $result['finished'],
+			),
+			'message' => implode( ' ', $messages ),
 		), 200 );
 	}
 

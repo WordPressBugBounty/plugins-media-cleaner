@@ -203,6 +203,43 @@ if ( !class_exists( 'MeowKit_WPMC_Admin' ) ) {
         return $links;
       }
       $isIssue = $this->isPro && !$this->is_registered();
+
+      // The licenser already knows WHY validation failed and stores it as
+      // license['issue'] (licenser.php), but this badge used to render a flat
+      // "License Issue" for every case. That sent people to support to ask a
+      // question the plugin could have answered: the most common one by far is a
+      // licence whose activation slot is held by another site, which reads as
+      // "my licence is broken" and gets reported as a billing problem.
+      $issueLabel = __( 'License Issue', $this->domain );
+      if ( $isIssue ) {
+        $license = get_option( $this->prefix . '_license', '' );
+        $issue   = is_array( $license ) && !empty( $license['issue'] ) ? $license['issue'] : null;
+        // Codes the store actually sends. Verified against EDD Software Licensing
+        // rather than guessed: an invented key would silently never match, and a
+        // wrong label is worse than the generic one.
+        $labels  = [
+          // `error` codes, from a failed activation.
+          'no_activations_left'           => __( 'License in use on another site', $this->domain ),
+          'expired'                       => __( 'License expired', $this->domain ),
+          'disabled'                      => __( 'License revoked', $this->domain ),
+          'missing'                       => __( 'License key not recognized', $this->domain ),
+          'key_mismatch'                  => __( 'License key not recognized', $this->domain ),
+          'item_name_mismatch'            => __( 'License is for another plugin', $this->domain ),
+          'invalid_item_id'               => __( 'License is for another plugin', $this->domain ),
+          'missing_item_id'               => __( 'License is for another plugin', $this->domain ),
+          'bundle_activation_not_allowed' => __( 'This license cannot be activated directly', $this->domain ),
+          // `license` statuses, when the key is known but not valid here.
+          'site_inactive'                 => __( 'License not activated on this site', $this->domain ),
+          'inactive'                      => __( 'License not activated on this site', $this->domain ),
+          // Genuinely no answer from the store. NOT invalid_response, which means the
+          // store replied and we could not make sense of it: blaming the connection
+          // there would send people chasing a firewall that is working fine.
+          'no_response'                   => __( 'License server unreachable', $this->domain ),
+        ];
+        if ( $issue !== null && isset( $labels[ $issue ] ) ) {
+          $issueLabel = $labels[ $issue ];
+        }
+      }
       if ( strpos( $pathName, $thisPathName ) !== false ) {
         // In network admin, handle differently (no settings page available)
         if ( is_network_admin() ) {
@@ -245,7 +282,7 @@ if ( !class_exists( 'MeowKit_WPMC_Admin' ) ) {
             'license' =>
             $this->is_registered() ?
               ( '<span style="color: #a75bd6;">' . __( 'Pro Version', $this->domain ) . '</span>' ) :
-                  ( $isIssue ? ( sprintf( '<span style="color: #ff3434;">' . __( 'License Issue', $this->domain ), $this->prefix ) . '</span>' ) : ( sprintf( '<span>' . __( '<a target="_blank" href="https://meowapps.com">Get the <u>Pro Version</u></a>', $this->domain ), $this->prefix ) . '</span>' ) ),
+                  ( $isIssue ? ( '<span style="color: #ff3434;">' . esc_html( $issueLabel ) . '</span>' ) : ( sprintf( '<span>' . __( '<a target="_blank" href="https://meowapps.com">Get the <u>Pro Version</u></a>', $this->domain ), $this->prefix ) . '</span>' ) ),
           ];
         }
         $links = array_merge( $new_links, $links );

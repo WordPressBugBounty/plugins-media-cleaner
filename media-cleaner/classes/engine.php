@@ -271,8 +271,12 @@ SQL;
 			}
 			$this->core->timeout_check();
 			$full_path = get_attached_file( $media );
+
 			if ( !$full_path || !is_file( $full_path ) || !is_readable( $full_path ) || is_link( $full_path ) ) {
-				throw new RuntimeException( sprintf( __( 'Duplicate analysis could not read the original file for Media #%d.', 'media-cleaner' ), $media ) );
+				$this->core->log( sprintf( "Duplicates: skipped Media #%d, the original file cannot be read.", $media ) );
+				$this->core->timeout_check_additem();
+				$processed++;
+				continue;
 			}
 			try {
 				$hash = $this->hash_file_safely( $full_path, $media );
@@ -283,6 +287,13 @@ SQL;
 				}
 				$yielded = true;
 				break;
+			}
+			catch ( Exception $e ) {
+				// The file disappeared or failed mid-read. Same reasoning as above: skip it, keep scanning.
+				$this->core->log( sprintf( "Duplicates: skipped Media #%d, %s", $media, $e->getMessage() ) );
+				$this->core->timeout_check_additem();
+				$processed++;
+				continue;
 			}
 			$path = $this->core->clean_uploaded_filename( $full_path );
 			$this->core->add_reference_url( $path, 'HASH:' . $hash, $media, array( 'force_cache' => true ) );
@@ -499,8 +510,11 @@ SQL;
 		$table_name_refs = $wpdb->prefix . "mclean_refs";
 		$run_id = $this->core->get_run_id();
 
+		// The hash references are stored as URL references, so mediaId is always NULL on those rows:
+		// extractRefsFromDuplicates() passes the media ID as the origin. Reading it back from origin
+		// is what makes the "is this copy referenced by ID?" test below able to match anything.
 		$request = $wpdb->prepare(
-			"SELECT mediaUrl, MIN(mediaId) AS mediaId FROM $table_name_refs
+			"SELECT mediaUrl, MAX(origin) AS mediaId FROM $table_name_refs
 			WHERE run_id = %d AND originType = %s AND mediaUrl IS NOT NULL
 			GROUP BY mediaUrl
 			ORDER BY mediaUrl ASC",
@@ -515,8 +529,8 @@ SQL;
 			return false;
 		}
 
-		// Protect one deterministic canonical copy from cleanup.
-		array_shift( $medias );
+		// Every copy in the group is reported, including the first one: the analysis describes what is
+		// on the disk, it does not decide what survives.
 		foreach ( $medias as $media ) {
 			$media_id = (int) $media->mediaId;
 			$media_url = (string) $media->mediaUrl;

@@ -45,7 +45,7 @@ class Meow_WPMC_Support {
       array_push( $unsupported, 'Visual Composer' );
 
     if ( defined( 'FUSION_BUILDER_VERSION' ) || defined( 'FUSION_CORE_VERSION' ) || has_action( 'avada_author_info' ) )
-      array_push( $unsupported, 'Fusion Builder' );
+      array_push( $unsupported, 'Avada (Fusion Builder)' );
 
     if ( defined( 'ELEMENTOR_VERSION' ) )
       array_push( $unsupported, 'Elementor' );
@@ -292,6 +292,11 @@ class Meow_WPMC_Support {
     if ( defined( 'WPRM_VERSION' ) || class_exists( 'WP_Recipe_Maker' ) ) {
       array_push( $unsupported, 'WP Recipe Maker' );
     }
+
+    		//Soliloquy
+		if ( defined( 'SOLILOQUY_VERSION' ) ) {
+			array_push( $unsupported, 'Soliloquy' );
+		}
 
     return $unsupported;
   }

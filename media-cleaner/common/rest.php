@@ -99,7 +99,7 @@ class MeowKit_WPMC_Rest {
    *
    * The analysis writes a verdict about this site into the options table and
    * keeps it. That is what makes it survive a reload, but it also means a
-   * description of your server's weaknesses — written by a third-party model —
+   * description of your server's weaknesses, written by a third-party model,
    * sits there indefinitely with nothing to remove it. Somebody should be able
    * to take it back, and clearing the consent means the panel explaining what
    * gets sent is shown again before anything is sent a second time.
@@ -195,7 +195,7 @@ class MeowKit_WPMC_Rest {
       . "Rules:\n"
       . "- Rate each of the three areas from 1 (bad) to 5 (good). Do not invent an overall score.\n"
       . "- Only report findings genuinely worth acting on. An empty findings list is a perfectly "
-      . "good answer for a healthy site — do not manufacture problems.\n"
+      . "good answer for a healthy site. Do not manufacture problems.\n"
       . "- Order findings by how much they matter, worst first.\n"
       . "- Be brief. The reader sees the titles first and opens the ones they care about, so a "
       . "title has to work on its own and the detail must not repeat it. No preamble, no restating "
@@ -211,7 +211,7 @@ class MeowKit_WPMC_Rest {
   public function file_rand( $filesize ) {
     // Write the benchmark file inside a dedicated subfolder of the uploads
     // directory (created on demand), then remove it. wp.org forbids writing to
-    // the plugin folder or the uploads root — only a sanctioned subfolder.
+    // the plugin folder or the uploads root, only a sanctioned subfolder.
     $upload = wp_upload_dir();
     if ( !empty( $upload['error'] ) || empty( $upload['basedir'] ) ) { return; }
     $dir = trailingslashit( $upload['basedir'] ) . 'meowapps';
@@ -268,7 +268,7 @@ class MeowKit_WPMC_Rest {
     $all_plugins = get_plugins();
     $result = [];
     foreach ( $all_plugins as $plugin_file => $plugin_data ) {
-      // Plugin file looks like "ai-engine/ai-engine.php" — the slug is the
+      // Plugin file looks like "ai-engine/ai-engine.php", the slug is the
       // first path segment. Some plugins live at the root (single file),
       // those we just skip; we only care about Meow Apps directories anyway.
       $parts = explode( '/', $plugin_file );

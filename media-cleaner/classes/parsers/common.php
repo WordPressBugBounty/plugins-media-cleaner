@@ -80,8 +80,10 @@ class MeowApps_WPMC_Parser_Common {
 	}
 
 	public function get_post_galleries_ids( $id ) {
-		global $post;
 		$content_post = get_post( $id );
+		if ( empty( $content_post ) ) {
+			return array();
+		}
 		$content = $content_post->post_content;
 		$ids = array();
 		if ( preg_match_all('/\[gallery.*ids=.(.*).\]/', $content, $foundArrayIds ) ) {

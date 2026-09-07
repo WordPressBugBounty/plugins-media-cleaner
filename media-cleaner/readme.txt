@@ -3,9 +3,9 @@ Contributors: TigrouMeow
 Tags: clean, media, files, images, library
 Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.2.6
+Stable tag: 7.2.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,16 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.7 (2026/09/07) =
+* Add: "Inspect" button for duplicates to compare and resolve issues from a unified view.
+* Add: Unlock Scan maintenance tool.
+* Add: Soliloquy parser.
+* Fix: Duplicates scan skips unreadable files instead of stopping, and duplicates are no longer protected from checks.
+* Fix: Loading bar now completes on each batch.
+* Fix: Force Clean Trash handles the trash inventory and checks both physical and database leftovers.
+* Update: SiteOrigin parser supports the gallery widget and extracts HTML content.
+* Update: Divi parser handles base64-encoded JSON references.
 
 = 7.2.6 (2026/08/17) =
 * Add: Support for SiteOrigin Page Builder.
