@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.2.7
+Stable tag: 7.2.8
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,12 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.8 (2026/09/14) =
+* Fix: Resolved a PHP warning that could appear during scans.
+* 🎵 Discuss with others about Media Cleaner on [the Discord](https://discord.gg/bHDGh38).
+* 🌴 Keep us motivated with [a little review here](https://wordpress.org/support/plugin/media-cleaner/reviews/). Thank you!
+* 🥰 If you want to help us, check our [Patreon](https://www.patreon.com/meowapps). Thank you!
 
 = 7.2.7 (2026/09/07) =
 * Add: "Inspect" button for duplicates to compare and resolve issues from a unified view.

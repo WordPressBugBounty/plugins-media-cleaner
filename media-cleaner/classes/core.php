@@ -99,7 +99,7 @@ class Meow_WPMC_Core {
 
 		// Only initialize variables if we are on a relevant screen
 		$pages  = [ 'wpmc_dashboard', 'wpmc_settings' ];
-		$page = isset( $_GET["page"] ) ? sanitize_text_field( $_GET["page"] ) : null;
+		$page = isset( $_GET["page"] ) ? sanitize_text_field( $_GET["page"] ) : '';
 		$is_wpmc_screen = in_array( $page, $pages );
 		
 		// Check if this is a REST request specifically for Media Cleaner
