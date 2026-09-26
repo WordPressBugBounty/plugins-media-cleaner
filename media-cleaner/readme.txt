@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.2.8
+Stable tag: 7.2.9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,19 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.2.9 (2026/09/26) =
+* Add: Live Logs panel on the scan dashboard showing scan, trash and delete activity in real time.
+* Add: Detailed timing and error tracking for the deletion process.
+* Add: Log history linked to the support ID in the Support Bundles section.
+* Update: Multilingual references are now resolved in their own scan step instead of during the references extraction.
+* Update: Failed items during deletion are now grouped in a single summary instead of opening an error modal right away.
+* Update: The license screen now explains the exact reason a license check failed.
+* Fix: A server that cannot reach the license server no longer freezes the admin for minutes.
+* Fix: Temporary errors while processing a media file no longer cause an endless retry loop.
+* Fix: Attachment lookup for multilingual references is faster on large sites.
+* Fix: SiteOrigin Page Builder parser no longer registers the same reference several times.
+* Fix: Meta Box parser now collects term meta in the scan once step using the paged parser.
 
 = 7.2.8 (2026/09/14) =
 * Fix: Resolved a PHP warning that could appear during scans.

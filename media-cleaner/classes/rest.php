@@ -8,6 +8,9 @@ class Meow_WPMC_Rest
 	private $namespace = 'media-cleaner/v1';
 	private $shutdown_run_id = 0;
 	private $shutdown_phase = null;
+	// The item a cleanup request was working on. A fatal names it, which is the difference between
+	// "deletion stopped" and "deletion stopped on this media".
+	private $shutdown_item = null;
 	private $shutdown_reserve = null;
 
 	public function __construct( $core, $admin ) {
@@ -254,15 +257,25 @@ class Meow_WPMC_Rest
 				) );
 
 			// LOGS
-			register_rest_route( $this->namespace, '/refresh_logs', array(
-				'methods' => 'POST',
-				'permission_callback' => array( $this->core, 'can_access_features' ),
-				'callback' => array( $this, 'rest_refresh_logs' )
-			) );
 			register_rest_route( $this->namespace, '/clear_logs', array(
 				'methods' => 'POST',
 				'permission_callback' => array( $this->core, 'can_access_features' ),
 				'callback' => array( $this, 'rest_clear_logs' )
+			) );
+			register_rest_route( $this->namespace, '/support_bundles', array(
+				'methods' => 'GET',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_support_bundles' )
+			) );
+			register_rest_route( $this->namespace, '/delete_support_bundle', array(
+				'methods' => 'POST',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_delete_support_bundle' )
+			) );
+			register_rest_route( $this->namespace, '/tail_logs', array(
+				'methods' => 'GET',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_tail_logs' )
 			) );
 			register_rest_route( $this->namespace, '/export', array(
 				'methods' => 'GET',
@@ -325,14 +338,29 @@ class Meow_WPMC_Rest
 	}
 
 	public function capture_fatal_shutdown() {
+		// Freed first, so what follows has room to run: this handler exists for the request that
+		// died of memory exhaustion, and it is no use if it dies of the same thing.
 		$this->shutdown_reserve = null;
-		if ( $this->shutdown_run_id < 1 || !$this->core->runs ) return;
 		$error = error_get_last();
 		$fatal_types = array( E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR );
 		if ( !$error || !in_array( $error['type'], $fatal_types, true ) ) return;
+		$message = isset( $error['message'] ) ? $error['message'] : __( 'The PHP worker stopped unexpectedly.', 'media-cleaner' );
+
+		// A fatal returns no response, so error_response() never runs and nothing records what
+		// happened: the request simply stops. Cleanup used to end there with no error, no Support
+		// ID and a log that just stopped mid-step. This is the only chance to leave something
+		// readable behind, so it happens for every request, run or not.
+		$this->core->log( sprintf( '🚫 The PHP worker stopped: %s', $message ) );
+		$this->core->create_support_bundle( $message, array(
+			'Code' => 'wpmc_fatal_error',
+			'Phase' => $this->shutdown_phase,
+			'Item' => $this->shutdown_item,
+			'File' => isset( $error['file'] ) ? $error['file'] . ':' . (int) $error['line'] : null,
+		) );
+
+		if ( $this->shutdown_run_id < 1 || !$this->core->runs ) return;
 		$run = $this->core->runs->get( $this->shutdown_run_id );
 		if ( !$run || !in_array( $run->status, array( 'running', 'paused' ), true ) ) return;
-		$message = isset( $error['message'] ) ? $error['message'] : __( 'The PHP worker stopped unexpectedly.', 'media-cleaner' );
 		$details = array(
 			'phase' => $this->shutdown_phase,
 			'file' => isset( $error['file'] ) ? $error['file'] : null,
@@ -384,14 +412,28 @@ class Meow_WPMC_Rest
 			: max( 0, (int) $transient['retry_after_ms'] );
 		$retryable_commit = in_array( $commit_state, array( 'not_committed', 'safe_to_retry' ), true );
 		$retryable_status = in_array( $status, array( 408, 429, 502, 503, 504 ), true );
+		$retryable = $retryable_commit && ( $retryable_status || !empty( $transient['retryable'] ) );
+		// Only a failure the user actually sees earns a bundle. A scan yields on its time budget
+		// dozens of times in a normal run, and each one comes through here as a retryable error;
+		// snapshotting those would bury the one failure that matters under its own retries.
+		$request_id = null;
+		if ( !$retryable ) {
+			$request_id = $this->core->create_support_bundle( $message, array(
+				'Code' => $code,
+				'Phase' => $phase,
+				'Run' => $run_id ? (string) $run_id : null,
+				'HTTP status' => (string) $status,
+				'Commit state' => $commit_state,
+			) );
+		}
 		$response = new WP_REST_Response( array(
 			'success' => false,
 			'error' => array(
-				'request_id' => wp_generate_uuid4(),
+				'request_id' => $request_id,
 				'run_id' => (int) $run_id,
 				'phase' => $phase,
 				'code' => $code,
-				'retryable' => $retryable_commit && ( $retryable_status || !empty( $transient['retryable'] ) ),
+				'retryable' => $retryable,
 				'retry_after_ms' => $retry_after_ms,
 				'commit_state' => $commit_state,
 				'message' => $message,
@@ -697,7 +739,19 @@ class Meow_WPMC_Rest
 					'cleanup_buffer' => $severely_constrained ? 5 : ( $profile_constrained ? 10 : 20 ),
 					'base_delay_ms' => $base_delay_ms,
 					'max_retries' => 4,
-					'request_timeout_ms' => max( 30000, min( 90000, (int) ceil( ( $request_budget + 15 ) * 1000 ) ) ),
+					// The work budget is soft: it is only read between parsers, so one slow third-party
+					// parser overruns it by a minute and the batch still ends in an orderly, resumable
+					// timeout. Deriving the client's patience from that budget made it hang up first,
+					// which turns a recoverable batch into a dead UI while the worker keeps running and
+					// writing. Wait for the server's own ceiling instead.
+					'request_timeout_ms' => max( 60000, min( 120000, $this->core->get_max_execution_time() * 1000 ) ),
+					// Cleanup gets its own, longer patience. A scan batch is many small items and can
+					// always hand back early; a delete is one call into wp_delete_attachment, which
+					// runs every hook the site has on it and cannot be interrupted part way. When
+					// that outlives the browser, each attempt is abandoned mid-flight even though the
+					// server completed the item — and the retry budget is spent on work that
+					// succeeded, until the operation gives up on itself.
+					'cleanup_timeout_ms' => max( 120000, min( 300000, $this->core->get_max_execution_time() * 1000 ) ),
 				),
 				'cleanup_allowed' => $this->core->runs->cleanup_allowed(),
 			),
@@ -773,6 +827,13 @@ class Meow_WPMC_Rest
 		}
 		else if ( $src === 'medias' ) {
 			$num = $this->engine->count_media_entries( $this->core->get_option( 'attach_is_use' ) );
+		}
+		else if ( $src === 'references' ) {
+			global $wpdb;
+			$num = (int) $wpdb->get_var( $wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->prefix}mclean_refs WHERE run_id = %d AND mediaUrl IS NOT NULL",
+				$this->core->get_run_id()
+			) );
 		}
 		else {
 			return $this->fail_run_response( new WP_Error(
@@ -873,6 +934,8 @@ class Meow_WPMC_Rest
 		$limit = isset( $params['limit'] ) ? max( 0, (int) $params['limit'] ) : 0;
 		$source = isset( $params['source'] ) ? $params['source'] : null;
 		$post_id = isset( $params['postId'] ) ? $params['postId'] : null;
+		global $wpdb;
+		$started_queries = $wpdb->num_queries;
 		$limitsize = $this->core->get_option( 'posts_buffer' );
 		$finished = false;
 		$processed = 0;
@@ -902,12 +965,27 @@ class Meow_WPMC_Rest
 		} else if( $source === 'thumbnails' ) {
 			$finished = $this->engine->extractRefsFromThumbnails( $limit, $limitsize, $message, $post_id, $processed );
 		}
+		else if ( $source === 'translations' ) {
+			// posts_buffer is sized for parsing a post, which is orders of magnitude dearer than
+			// looking a URL up. Paging this phase that small would cost hundreds of round trips to
+			// do a few seconds of work.
+			$limitsize = min( 2000, max( 200, 10 * (int) $this->core->get_option( 'analysis_buffer' ) ) );
+			$finished = $this->engine->extractRefsFromTranslations( $limit, $limitsize, $message, $post_id, $processed );
+		}
 		else {
 			return $this->fail_run_response( new WP_Error(
 				'wpmc_reference_source_invalid',
 				__( 'No valid source was provided for reference extraction.', 'media-cleaner' ),
 				array( 'status' => 400 )
 			), $run->id, 'extractReferences' );
+		}
+
+		// One honest line per batch. Every other total the console shows is summed from lines a parser
+		// happened to emit; this is the only place that knows what the batch as a whole cost, and the
+		// query count is what separates "slow PHP" from "hammering the database".
+		if ( $this->core->is_debug() ) {
+			$this->core->log( sprintf( '📊 Batch done: %d items, %d queries.',
+				$processed, max( 0, $wpdb->num_queries - $started_queries ) ) );
 		}
 
 		$this->core->clean_ob();
@@ -1411,8 +1489,173 @@ class Meow_WPMC_Rest
 		return $path !== '' ? $path : null;
 	}
 
-	function rest_refresh_logs() {
-		return new WP_REST_Response( [ 'success' => true, 'data' => $this->core->get_logs() ], 200 );
+	// The live console. log() opens, writes and closes per line, so a line is on disk the moment the
+	// scan produces it -- the file is already the event stream, and a second cheap request can read it
+	// while the scan request that is writing it has not returned yet. That is why this is a byte-offset
+	// tail and not a socket: SSE would hold a PHP-FPM worker open for the whole scan, competing with
+	// the scan itself for the very workers it needs.
+	function rest_tail_logs( $request ) {
+		$offset = max( 0, (int) $request->get_param( 'offset' ) );
+		$enabled = (bool) $this->core->is_debug();
+		$path = $this->core->get_logs_path();
+		if ( !$path || !file_exists( $path ) ) {
+			return new WP_REST_Response( array( 'success' => true, 'data' => array(
+				'lines' => array(), 'offset' => 0, 'enabled' => $enabled,
+			) ), 200 );
+		}
+		clearstatcache( true, $path );
+		$size = (int) filesize( $path );
+		// log() rotates at 5MB and clear_logs() unlinks the file, so a file smaller than the caller's
+		// offset is a different file: reading from that offset would land mid-line in new content.
+		if ( $offset > $size ) $offset = 0;
+		// A tail is for watching, not for downloading a backlog. A caller that fell far behind skips
+		// ahead instead of dragging megabytes through a poll that repeats every second.
+		$max_chunk = 128 * 1024;
+		if ( $size - $offset > $max_chunk ) $offset = $size - $max_chunk;
+		$chunk = '';
+		if ( $size > $offset ) {
+			$handle = @fopen( $path, 'rb' );
+			if ( $handle ) {
+				fseek( $handle, $offset );
+				$chunk = (string) fread( $handle, $size - $offset );
+				fclose( $handle );
+			}
+		}
+		// Whole lines only. The scan is writing as we read, so the tail of the chunk is very often half
+		// a line; keeping it would render as garbage and then be shown again with its other half.
+		$last_break = strrpos( $chunk, "\n" );
+		$chunk = $last_break === false ? '' : substr( $chunk, 0, $last_break + 1 );
+		$offset += strlen( $chunk );
+		$events = array();
+		foreach ( explode( "\n", $chunk ) as $line ) {
+			$event = $this->parse_log_line( rtrim( $line ) );
+			if ( $event ) $events[] = $event;
+		}
+		return new WP_REST_Response( array( 'success' => true, 'data' => array(
+			'events' => $events, 'offset' => $offset, 'enabled' => $enabled,
+		) ), 200 );
+	}
+
+	// The log is written for a human to read, and the console has to draw it. Turning one into the
+	// other is parsing either way; doing it here keeps it in the same file as the code that writes
+	// the lines, so a changed message and its reader stay next to each other — and it leaves the
+	// console purely presentational instead of carrying a second copy of the vocabulary in regex.
+	//
+	// 'group' is what ties consecutive events to the parser that produced them, which is what the
+	// console draws as one block.
+	private function parse_log_line( $line ) {
+		if ( $line === '' ) return null;
+		$time = null;
+		if ( preg_match( '/^\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2}): ?(.*)$/', $line, $m ) ) {
+			$time = $m[1];
+			$line = $m[2];
+		}
+		if ( $line === '' ) return null;
+
+		$event = function ( $kind, $text, $extra = array() ) use ( $time ) {
+			return array_merge( array( 'kind' => $kind, 'time' => $time, 'text' => $text, 'group' => null ), $extra );
+		};
+
+		// A parser starting is what opens a block, so it carries the group every following event
+		// inherits until the next one.
+		if ( preg_match( '/^▶ (\S+) \((\S+)\)$/', $line, $m ) ) {
+			return $event( 'parser', $m[1], array( 'group' => $m[1], 'hook' => $m[2] ) );
+		}
+		if ( preg_match( '/^🐌 (\S+) \((\S+)\) took ([\d.]+)s, (\d+) queries$/', $line, $m ) ) {
+			return $event( 'timing', $m[1], array(
+				'group' => $m[1], 'hook' => $m[2],
+				'ms' => (int) round( (float) $m[3] * 1000 ), 'queries' => (int) $m[4],
+			) );
+		}
+		if ( preg_match( '/^🔍 Processing post ID: (\d+) \| Type: ([^|]*) \| Title: (.*)$/', $line, $m ) ) {
+			return $event( 'post', trim( $m[3] ) !== '' ? trim( $m[3] ) : sprintf( '#%d', $m[1] ), array(
+				'group' => 'post-' . $m[1], 'postId' => (int) $m[1], 'postType' => trim( $m[2] ),
+			) );
+		}
+		if ( preg_match( '/^✓ Completed post ID: (\d+) in ([\d.]+)ms$/', $line, $m ) ) {
+			return $event( 'post-done', sprintf( '#%d', $m[1] ), array(
+				'group' => 'post-' . $m[1], 'postId' => (int) $m[1], 'ms' => (int) round( (float) $m[2] ),
+			) );
+		}
+		if ( preg_match( '/^🗑 (\S+) #(\d+) ?(.*)$/', $line, $m ) ) {
+			return $event( 'cleanup', trim( $m[3] ) !== '' ? trim( $m[3] ) : sprintf( '#%d', $m[2] ), array(
+				'group' => 'cleanup-' . $m[2], 'itemId' => (int) $m[2], 'hook' => $m[1],
+			) );
+		}
+		if ( preg_match( '/^✓ #(\d+) was already done$/', $line, $m ) ) {
+			return $event( 'ok', sprintf( __( '#%d was already done', 'media-cleaner' ), $m[1] ) );
+		}
+		if ( preg_match( '/^✓ Cleaned #(\d+) in ([\d.]+)ms$/', $line, $m ) ) {
+			return $event( 'cleanup-done', sprintf( '#%d', $m[1] ), array(
+				'group' => 'cleanup-' . $m[1], 'itemId' => (int) $m[1], 'ms' => (int) round( (float) $m[2] ),
+			) );
+		}
+		if ( preg_match( '/^📊 Batch done: (\d+) items, (\d+) queries/', $line, $m ) ) {
+			return $event( 'batch', __( 'Batch complete', 'media-cleaner' ), array(
+				'count' => (int) $m[1], 'queries' => (int) $m[2],
+			) );
+		}
+		if ( preg_match( '/^Flushing (?:remaining )?(\d+) references to the database\.\.\.\s*(.*)$/', $line, $m ) ) {
+			// The sample is what the console shows under the post; the count is what it totals.
+			$sample = trim( $m[2] );
+			return $event( 'refs', $sample !== '' ? $sample : __( 'references written', 'media-cleaner' ),
+				array( 'count' => (int) $m[1] ) );
+		}
+		if ( preg_match( '/^🏁 (.*)$/u', $line, $m ) ) {
+			return $event( 'phase', rtrim( $m[1], '.' ) );
+		}
+		if ( strpos( $line, '😵' ) === 0 || strpos( $line, '🚫' ) === 0 ) {
+			return $event( 'error', ltrim( preg_replace( '/^(😵|🚫)/u', '', $line ) ) );
+		}
+		if ( strpos( $line, '→ ' ) === 0 ) {
+			return $event( 'step', substr( $line, strlen( '→ ' ) ) );
+		}
+		if ( strpos( $line, '🍀' ) === 0 ) {
+			return $event( 'detail', ltrim( preg_replace( '/^🍀/u', '', $line ) ) );
+		}
+		if ( strpos( $line, '✅' ) === 0 ) {
+			return $event( 'ok', ltrim( preg_replace( '/^✅/u', '', $line ) ) );
+		}
+		if ( strpos( $line, '＋' ) === 0 ) {
+			return $event( 'ref', ltrim( preg_replace( '/^＋/u', '', $line ) ) );
+		}
+		if ( strpos( $line, '⚠' ) === 0 ) {
+			return $event( 'warn', ltrim( preg_replace( '/^⚠/u', '', $line ) ) );
+		}
+		if ( preg_match( '/unbounded database query/', $line ) ) {
+			return $event( 'warn', $line );
+		}
+		return $event( 'info', $line );
+	}
+
+	// The list carries the bundles themselves: they are bounded by design and the only thing anyone
+	// does with one is read it or copy it, so a second round trip to fetch one would buy nothing.
+	function rest_support_bundles() {
+		global $wpdb;
+		$table = $wpdb->prefix . 'mclean_support';
+		if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) !== $table ) {
+			return new WP_REST_Response( array( 'success' => true, 'data' => array() ), 200 );
+		}
+		$rows = $wpdb->get_results( "SELECT support_id, created_at, summary, logs FROM $table ORDER BY id DESC LIMIT 20" );
+		return new WP_REST_Response( array( 'success' => true, 'data' => array_map( function ( $row ) {
+			return array(
+				'supportId' => $row->support_id,
+				'createdAt' => $row->created_at,
+				'summary' => $row->summary,
+				'logs' => $row->logs,
+			);
+		}, is_array( $rows ) ? $rows : array() ) ), 200 );
+	}
+
+	function rest_delete_support_bundle( $request ) {
+		global $wpdb;
+		$params = $this->request_json( $request );
+		$support_id = isset( $params['supportId'] ) ? sanitize_text_field( $params['supportId'] ) : '';
+		if ( $support_id === '' ) {
+			return $this->error_response( new WP_Error( 'wpmc_support_id_required', __( 'A support ID is required.', 'media-cleaner' ), array( 'status' => 400 ) ) );
+		}
+		$wpdb->delete( $wpdb->prefix . 'mclean_support', array( 'support_id' => $support_id ), array( '%s' ) );
+		return new WP_REST_Response( array( 'success' => true ), 200 );
 	}
 
 	function rest_clear_logs() {
@@ -2102,6 +2345,13 @@ class Meow_WPMC_Rest
 		$attempted = 0;
 		$yielded = false;
 		$this->core->timeout_check_start( count( $ids ) );
+		global $wpdb;
+		$started_queries = $wpdb->num_queries;
+		// Cleanup used to be silent. A batch that never came back left nothing behind to read —
+		// no response, so no support bundle either — and the only way to see where the time went
+		// was to guess.
+		$this->core->log( sprintf( '🏁 Cleanup: %s, %d items', $operation, count( $ids ) ) );
+		$this->shutdown_phase = 'cleanup_' . sanitize_key( $operation );
 
 		foreach ( $ids as $index => $id ) {
 			if ( $index > 0 && $this->core->timeout_should_yield() ) {
@@ -2117,6 +2367,7 @@ class Meow_WPMC_Rest
 				continue;
 			}
 			if ( $journal->state === 'complete' ) {
+				$this->core->log( sprintf( '✓ #%d was already done', $id ) );
 				$results[] = array( 'id' => $id, 'success' => true, 'idempotent' => true );
 				$succeeded++;
 				continue;
@@ -2141,7 +2392,9 @@ class Meow_WPMC_Rest
 			$requires_identity = in_array( $operation, array( 'delete', 'recover', 'repair' ), true );
 			if ( $requires_identity && empty( $manifest['identity_validated'] ) ) {
 				$issue = isset( $issue ) && $issue ? $issue : $this->core->get_issue( $id );
-				$identity = $issue ? $this->core->validate_issue_manifest( $issue ) : new WP_Error( 'wpmc_issue_missing', __( 'The selected Media Cleaner result no longer exists.', 'media-cleaner' ) );
+				$identity = $issue ? $this->core->timed( 'validate_issue_manifest', function () use ( $issue ) {
+					return $this->core->validate_issue_manifest( $issue );
+				} ) : new WP_Error( 'wpmc_issue_missing', __( 'The selected Media Cleaner result no longer exists.', 'media-cleaner' ) );
 				if ( is_wp_error( $identity ) ) {
 					$this->core->runs->update_operation( $journal->id, 'failed', $manifest, $identity );
 					$results[] = array( 'id' => $id, 'success' => false, 'code' => $identity->get_error_code(), 'message' => $identity->get_error_message() );
@@ -2156,7 +2409,14 @@ class Meow_WPMC_Rest
 				continue;
 			}
 			try {
+				$item_started = microtime( true );
+				$issue = $issue ? $issue : $this->core->get_issue( $id );
+				$label = $issue && !empty( $issue->path ) ? $issue->path : '';
+				$this->core->log( sprintf( '🗑 %s #%d %s', $operation, $id, $label ) );
+				$this->shutdown_item = sprintf( '#%d %s', $id, $label );
 				$result = in_array( $operation, array( 'delete', 'recover' ), true ) ? call_user_func( $callback, $id, $manifest ) : call_user_func( $callback, $id );
+				$this->core->log( sprintf( '✓ Cleaned #%d in %.0fms', $id, ( microtime( true ) - $item_started ) * 1000 ) );
+				$this->shutdown_item = null;
 				if ( is_wp_error( $result ) || $result !== true ) {
 					$error = is_wp_error( $result ) ? $result : new WP_Error( 'wpmc_operation_failed', __( 'The item could not be updated.', 'media-cleaner' ) );
 					$this->core->runs->update_operation( $journal->id, 'failed', null, $error );
@@ -2180,6 +2440,13 @@ class Meow_WPMC_Rest
 				$results[] = array( 'id' => $id, 'success' => false, 'code' => $error->get_error_code(), 'message' => $error->get_error_message() );
 				$failed++;
 			}
+		}
+
+		$this->core->log( sprintf( '📊 Batch done: %d items, %d queries.',
+			$attempted, max( 0, $wpdb->num_queries - $started_queries ) ) );
+		if ( $yielded ) {
+			$this->core->log( sprintf( '🍀 Yielded with %d of %d items left for the next request.',
+				max( 0, count( $ids ) - $attempted ), count( $ids ) ) );
 		}
 
 		$response = array(

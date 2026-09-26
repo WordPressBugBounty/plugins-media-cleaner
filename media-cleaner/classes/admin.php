@@ -59,6 +59,8 @@ class Meow_WPMC_Admin extends MeowKit_WPMC_Admin {
       'cleanup_allowed' => $this->core->runs ? $this->core->runs->cleanup_allowed() : false,
       'cleanup_status' => $this->core->runs ? $this->core->runs->cleanup_status() : null,
 			'schema_ready' => $this->core->runs ? $this->core->runs->tables_exist() : false,
+      // Decides whether the scan needs its translation-resolving step at all.
+      'is_multilingual' => $this->core->is_multilingual(),
       'options' => $options
     ] );
   }

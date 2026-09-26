@@ -64,6 +64,54 @@ SQL;
 		return (int) $wpdb->get_var( $q );
 	}
 
+	// Running out of time after real work is done is not a failure, it is a pause: the caller breaks,
+	// keeps what it collected and resumes next request. But an item that cannot finish inside a whole
+	// fresh request budget is a different thing entirely. The exception escapes the loop, so the
+	// batch never reaches write_references() or save_progress(), the offset never advances, and the
+	// next request starts on the same item and fails the same way — forever, with nothing in the log
+	// to say which item is responsible. So the first item of a request is allowed to fail loudly.
+	private function fail_if_first_item( Meow_WPMC_Transient_Exception $e, $processed, $message ) {
+		if ( $processed === 0 ) {
+			throw new RuntimeException( $message, 0, $e );
+		}
+	}
+
+	// The once-phase can outlast a request. While it does, $limit stays 0 and the block that runs the
+	// widgets is entered again on every batch. The scan_once parsers survive that because they are
+	// journaled and skipped once complete; the widgets were not, so each batch re-read and re-wrote
+	// the same widget references before it could get back to the parser that had not finished yet.
+	// Journaled as one unit rather than per widget: a widget's position in sidebars_widgets is not
+	// an identity stable enough to resume against halfway through the list.
+	private function scan_widgets_once() {
+		$runs = $this->core->runs;
+		$run_id = $this->core->get_run_id();
+		$journal = null;
+		if ( $run_id > 0 && $runs ) {
+			$journal = $runs->get_work( $run_id, 'scanWidgets', 'widgets' );
+			if ( $journal && $journal->status === 'complete' ) return;
+			if ( !$journal ) {
+				$runs->enqueue_work( $run_id, 'scanWidgets', 'parser', 'widgets' );
+				$journal = $runs->get_work( $run_id, 'scanWidgets', 'widgets' );
+			}
+		}
+		global $wp_registered_widgets;
+		$syswidgets = is_array( $wp_registered_widgets ) ? $wp_registered_widgets : array();
+		$active_widgets = get_option( 'sidebars_widgets' );
+		$active_widgets = is_array( $active_widgets ) ? $active_widgets : array();
+		foreach ( $active_widgets as $sidebar_name => $widgets ) {
+			if ( $sidebar_name != 'wp_inactive_widgets' && !empty( $widgets ) && is_array( $widgets ) ) {
+				foreach ( $widgets as $key => $widget ) {
+					if ( isset( $syswidgets[ $widget ] ) ) $this->core->safe_do_action( 'wpmc_scan_widget', $syswidgets[ $widget ] );
+				}
+			}
+		}
+		$this->core->safe_do_action( 'wpmc_scan_widgets' );
+		// Only mark it done once its references are actually stored: a crash between the two would
+		// otherwise leave the phase complete and its widgets unrecorded, which reads as unused.
+		$this->core->write_references();
+		if ( $journal ) $runs->update_work( $journal->id, 'complete', 0 );
+	}
+
 	// Parse the posts for references (based on $limit and $limitsize for paging the scan)
 	function extractRefsFromContent( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
 		$processed = 0;
@@ -98,23 +146,8 @@ SQL;
 		// Only at the beginning, check the Widgets and the Scan Once in the Parsers
 		if ( empty( $limit ) ) {
 			$this->core->log( "🏁 Extracting refs from content..." );
-			//if ( get_option( 'wpmc_widgets', false ) ) {
-				global $wp_registered_widgets;
-				$syswidgets = is_array( $wp_registered_widgets ) ? $wp_registered_widgets : array();
-				$active_widgets = get_option( 'sidebars_widgets' );
-				$active_widgets = is_array( $active_widgets ) ? $active_widgets : array();
-				foreach ( $active_widgets as $sidebar_name => $widgets ) {
-					if ( $sidebar_name != 'wp_inactive_widgets' && !empty( $widgets ) && is_array( $widgets ) ) {
-						foreach ( $widgets as $key => $widget ) {
-							if ( isset( $syswidgets[ $widget ] ) ) $this->core->safe_do_action( 'wpmc_scan_widget', $syswidgets[ $widget ] );
-						}
-					}
-				}
-				$this->core->safe_do_action( 'wpmc_scan_widgets' );
-			//}
+			$this->scan_widgets_once();
 			$this->core->safe_do_action( 'wpmc_scan_once' );
-
-			
 		}
 
 		$is_debug = $this->core->is_debug();
@@ -137,10 +170,18 @@ SQL;
 			}
 
 			// Check content
-			if ( $check_content ) {
-				$this->core->safe_do_action( 'wpmc_scan_postmeta', $post );
-				$html = get_post_field( 'post_content', $post );
-				$this->core->safe_do_action( 'wpmc_scan_post', $html, $post );
+			try {
+				if ( $check_content ) {
+					$this->core->safe_do_action( 'wpmc_scan_postmeta', $post );
+					$html = get_post_field( 'post_content', $post );
+					$this->core->safe_do_action( 'wpmc_scan_post', $html, $post );
+				}
+			}
+			catch ( Meow_WPMC_Transient_Exception $e ) {
+				$this->fail_if_first_item( $e, $processed, sprintf(
+					__( 'Post #%d cannot be scanned within this server request budget. Turn on the debug logs to see which parser is spending the time.', 'media-cleaner' ), $post ) );
+				$yielded = true;
+				break;
 			}
 
 			// Extra scanning methods
@@ -182,6 +223,84 @@ SQL;
 		return $finished;
 	}
 
+	// WPML keeps one attachment per language. A URL reference already covers every duplicate that
+	// shares the file, because check_media() tests an attachment's own paths against the URL
+	// references — what it cannot cover is a translation stored under its own file, reachable only
+	// by resolving the URL to an ID and expanding it.
+	//
+	// That resolution used to live in add_reference_url(), so every parser paid for it inline: a
+	// postmeta lookup per parser call, and the same media resolved again on every batch because the
+	// url->id cache only lives for one request. It is set-based work over the run's references, so
+	// it runs once, here, after they have all been collected.
+	function extractRefsFromTranslations( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
+		global $wpdb;
+		$processed = 0;
+		if ( !$this->core->is_multilingual() || $this->core->current_method !== 'media' ) {
+			$message = __( "Skipped, as the site is not multilingual.", 'media-cleaner' );
+			return true;
+		}
+
+		// Only the URL rows, and this phase only ever inserts ID rows, so the set it pages over
+		// cannot move underneath it — which is what makes plain offset paging safe here.
+		$table = $wpdb->prefix . 'mclean_refs';
+		$rows = $wpdb->get_results( $wpdb->prepare(
+			"SELECT mediaUrl, originType, origin FROM $table
+			WHERE run_id = %d AND mediaUrl IS NOT NULL
+			ORDER BY id ASC LIMIT %d, %d",
+			$this->core->get_run_id(), (int) $limit, (int) $limitsize
+		) );
+		if ( $wpdb->last_error ) {
+			throw new RuntimeException( sprintf( __( 'Media Cleaner could not read references: %s', 'media-cleaner' ), $wpdb->last_error ) );
+		}
+		if ( !is_array( $rows ) ) $rows = array();
+
+		if ( empty( $limit ) ) {
+			$this->core->log( "🏁 Resolving translated media..." );
+		}
+
+		$this->core->timeout_check_start( count( $rows ) );
+		$yielded = false;
+		// Resolving costs one postmeta pass per chunk however many URLs it carries, so the chunk is
+		// the unit of work and the unit of resumption: $processed only counts rows already recorded.
+		foreach ( array_chunk( $rows, 100 ) as $chunk ) {
+			if ( $this->core->timeout_should_yield() ) {
+				$yielded = true;
+				break;
+			}
+			$this->core->timeout_check();
+			try {
+				$this->core->add_translated_references( $chunk );
+				$this->core->write_references();
+			}
+			catch ( Meow_WPMC_Transient_Exception $e ) {
+				$this->fail_if_first_item( $e, $processed, __( 'Translated media cannot be resolved within this server request budget.', 'media-cleaner' ) );
+				$yielded = true;
+				break;
+			}
+			$this->core->timeout_check_additem();
+			$processed += count( $chunk );
+		}
+
+		$this->core->write_references();
+		$this->core->save_progress( 'extractReferencesFromTranslations', array(
+			'type' => 'translations',
+			'limit' => $limit,
+			'limitSize' => $limitsize,
+			'next' => $limit + $processed,
+			'processed' => $processed,
+			'postId' => null,
+		) );
+
+		$finished = !$yielded && $processed === count( $rows ) && count( $rows ) < $limitsize;
+		if ( $finished ) {
+			$this->core->save_progress( 'extractReferencesFromTranslations_finished' );
+			$this->core->log( "Finished resolving translated media." );
+		}
+		$elapsed = $this->core->timeout_get_elapsed();
+		$message = sprintf( __( "Resolved translations for %d references in %s.", 'media-cleaner' ), $processed, $elapsed );
+		return $finished;
+	}
+
 	function extractRefsFromThumbnails( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
 		$medias = $this->get_media_entries( $limit, $limitsize, false );
 		$processed = 0;
@@ -200,37 +319,45 @@ SQL;
 				break;
 			}
 			$this->core->timeout_check();
-			$file = get_attached_file( $media_id );
-			$meta = wp_get_attachment_metadata( $media_id );
+			try {
+				$file = get_attached_file( $media_id );
+				$meta = wp_get_attachment_metadata( $media_id );
 
-			if ( ! is_array( $meta ) || ! isset( $meta['sizes'] ) ) {
-				$meta = array( 'sizes' => array() );
-			}
+				if ( ! is_array( $meta ) || ! isset( $meta['sizes'] ) ) {
+					$meta = array( 'sizes' => array() );
+				}
 
-			// Get the current registered image sizes
-			$needed_sizes = wp_get_registered_image_subsizes();
+				// Get the current registered image sizes
+				$needed_sizes = wp_get_registered_image_subsizes();
 			
-			foreach ( array_keys( $needed_sizes ) as $size ) {
-				$image_path = path_join( dirname( $file ), $meta['sizes'][ $size ]['file'] ?? '' );
-				$file_exists = isset( $meta['sizes'][ $size ] ) && file_exists( $image_path ) && filesize( $image_path ) > 0;
-				if ( !$file_exists ) {
-					continue;
-				}
+				foreach ( array_keys( $needed_sizes ) as $size ) {
+					$image_path = path_join( dirname( $file ), $meta['sizes'][ $size ]['file'] ?? '' );
+					$file_exists = isset( $meta['sizes'][ $size ] ) && file_exists( $image_path ) && filesize( $image_path ) > 0;
+					if ( !$file_exists ) {
+						continue;
+					}
 
-				$image_path = $this->core->clean_uploaded_filename( $image_path );
+					$image_path = $this->core->clean_uploaded_filename( $image_path );
 
-				// Check if this size should be marked as an issue instead of a reference
-				if ( in_array( $size, $force_issue_sizes ) ) {
-					// Mark as issue instead of reference
-					$this->core->add_issue( $image_path, 'FORCED_THUMBNAIL_ISSUE', $media_id );
-				} else {
-					// Add a reference for generated thumbnail
-					$this->core->add_reference_url(
-						$image_path,
-						"{OG_THUMB}" . $size,
-						$media_id, ['force_cache' => true ]
-					);
+					// Check if this size should be marked as an issue instead of a reference
+					if ( in_array( $size, $force_issue_sizes ) ) {
+						// Mark as issue instead of reference
+						$this->core->add_issue( $image_path, 'FORCED_THUMBNAIL_ISSUE', $media_id );
+					} else {
+						// Add a reference for generated thumbnail
+						$this->core->add_reference_url(
+							$image_path,
+							"{OG_THUMB}" . $size,
+							$media_id, ['force_cache' => true ]
+						);
+					}
 				}
+			}
+			catch ( Meow_WPMC_Transient_Exception $e ) {
+				$this->fail_if_first_item( $e, $processed, sprintf(
+					__( 'Media #%d has too many sizes to check within this server request budget.', 'media-cleaner' ), $media_id ) );
+				$yielded = true;
+				break;
 			}
 			$this->core->timeout_check_additem();
 			$processed++;
@@ -282,9 +409,8 @@ SQL;
 				$hash = $this->hash_file_safely( $full_path, $media );
 			}
 			catch ( Meow_WPMC_Transient_Exception $e ) {
-				if ( $processed === 0 ) {
-					throw new RuntimeException( sprintf( __( 'Media #%d is too large or slow to hash within this server request budget.', 'media-cleaner' ), $media ), 0, $e );
-				}
+				$this->fail_if_first_item( $e, $processed, sprintf(
+					__( 'Media #%d is too large or slow to hash within this server request budget.', 'media-cleaner' ), $media ) );
 				$yielded = true;
 				break;
 			}
@@ -369,8 +495,16 @@ SQL;
 			}
 			$this->core->timeout_check();
 			// Check the media
-			$paths = $this->core->get_paths_from_attachment( $media );
-			$this->core->add_reference_url( $paths, 'MEDIA LIBRARY' );
+			try {
+				$paths = $this->core->get_paths_from_attachment( $media );
+				$this->core->add_reference_url( $paths, 'MEDIA LIBRARY' );
+			}
+			catch ( Meow_WPMC_Transient_Exception $e ) {
+				$this->fail_if_first_item( $e, $processed, sprintf(
+					__( 'Media #%d cannot be read within this server request budget.', 'media-cleaner' ), $media ) );
+				$yielded = true;
+				break;
+			}
 			$this->core->timeout_check_additem();
 			$processed++;
 		}
