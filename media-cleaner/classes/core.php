@@ -311,7 +311,7 @@ class Meow_WPMC_Core {
 		if ( !preg_match( '/^(SELECT|WITH)\b/i', $normalized ) ) return $query;
 		if ( preg_match( '/\bLIMIT\s+\d+/i', $normalized ) ) return $query;
 		if ( preg_match( '/^SELECT\s+(?:DISTINCT\s+)?(?:COUNT|SUM|MIN|MAX|AVG|EXISTS)\s*\(/i', $normalized ) ) return $query;
-		if ( preg_match( '/\b(?:ID|post_id|meta_id|term_id|term_taxonomy_id|option_id|option_name|user_id)\s*(?:=|IN\s*\()/i', $normalized ) ) return $query;
+		if ( preg_match( '/\b(?:ID|post_id|meta_id|term_id|term_taxonomy_id|option_id|option_name|user_id|\w+_hash)\s*(?:=|IN\s*\()/i', $normalized ) ) return $query;
 		// Only Media Cleaner's own SQL is a Media Cleaner bug. WordPress and other plugins
 		// (WPML translates media while our parsers run) issue their own unbounded SELECTs
 		// during a scan, and blaming the parser for those is noise nobody can act on.
@@ -558,7 +558,8 @@ class Meow_WPMC_Core {
 		if ( empty( $this->start_time ) ) $this->start_time = $now;
 		$this->time_elapsed = $now - $this->start_time;
 		$this->time_remaining = $this->get_request_time_budget() - ( $now - $this->request_start_time );
-		if ( $this->catch_timeout && $this->timeout_should_yield() ) {
+		$budget = $this->items_checked === 0 ? $this->get_item_time_ceiling() : null;
+		if ( $this->catch_timeout && $this->timeout_should_yield( $budget ) ) {
 				error_log("Media Cleaner Timeout! Check the Media Cleaner logs for more info.");
 				$this->log( "😵 Timeout! Some info for debug:" );
 				$this->log( "🍀 Elapsed time: $this->time_elapsed" );
@@ -570,9 +571,20 @@ class Meow_WPMC_Core {
 		}
 	}
 
-	public function timeout_should_yield() {
+	// The work budget decides when to hand back between items. The first item of a request has
+	// nothing to hand back to: stopping it part way only means the next request starts on it again
+	// and stops the same way, which fails the run on a page the server could have finished. So once
+	// it has started, that item may use what the server and the client actually allow.
+	public function get_item_time_ceiling() {
+		// The client gives up on a scan batch at 120s at most (request_timeout_ms in rest.php).
+		$hard = min( $this->get_max_execution_time(), 120 );
+		return max( $this->get_request_time_budget(), $hard - max( 2.5, min( 6, $hard * 0.2 ) ) );
+	}
+
+	public function timeout_should_yield( $budget = null ) {
 		$now = microtime( true );
-		$this->time_remaining = $this->get_request_time_budget() - ( $now - $this->request_start_time );
+		$budget = $budget === null ? $this->get_request_time_budget() : $budget;
+		$this->time_remaining = $budget - ( $now - $this->request_start_time );
 		$next_item_reserve = max( 1.25, $this->item_scan_avg_time * 1.75 );
 		if ( !$this->is_cli && $this->time_remaining <= $next_item_reserve ) return true;
 		$memory_limit = $this->parse_ini_bytes( ini_get( 'memory_limit' ) );
@@ -1777,7 +1789,7 @@ class Meow_WPMC_Core {
 		}
 		if ( empty( $operation_manifest['identity_validated'] ) ) {
 			$identity = $this->timed( 'validate_issue_manifest', function () use ( $issue ) {
-				return $this->validate_issue_manifest( $issue );
+				return $this->validate_issue_manifest( $issue, 'recover' );
 			} );
 			if ( is_wp_error( $identity ) ) return $identity;
 		}
@@ -2424,7 +2436,7 @@ class Meow_WPMC_Core {
 				$relatives = $this->trash_relatives( $issue );
 				// Healthy trash: its files are still in quarantine and still verify. That
 				// is the only kind that can be given back, and it is left untouched.
-				if ( $this->quarantine_holds( $relatives ) && !is_wp_error( $this->validate_issue_manifest( $issue ) ) ) continue;
+				if ( $this->quarantine_holds( $relatives ) && !is_wp_error( $this->validate_issue_manifest( $issue, 'recover' ) ) ) continue;
 				// Best effort: drop whatever is still physically in quarantine. Directories
 				// and symlinks are never removed, and a missing or unsafe path is skipped
 				// rather than fatal — the point is to unstick the record.
@@ -3430,10 +3442,17 @@ class Meow_WPMC_Core {
 		return $manifest;
 	}
 
-	// Returns null for a file that does not exist, a 64-char sha256 fingerprint for a
-	// normal file, or the FINGERPRINT_UNSAFE sentinel for a file that exists but cannot be
-	// safely fingerprinted.
-	public function file_fingerprint( $absolute_path ) {
+	// Returns null for a file that does not exist, a "v2:" + sha256 fingerprint for a normal
+	// file, or the FINGERPRINT_UNSAFE sentinel for a file that exists but cannot be safely
+	// fingerprinted.
+	//
+	// v2 hashes the size and the first/last 64 KB only. The legacy hash (no prefix) also mixed in
+	// mtime, inode and device, which are not stable on some hosts (network or overlay storage,
+	// backups restoring files, a copy fallback when moving to trash): cleanup then failed with
+	// "A file changed after the scan" even right after a new scan, and trashed files could never
+	// be restored (wp.org forum, 2026-08). Legacy hashes stored by older scans are still checked
+	// with the legacy formula, so existing results keep working until the next scan.
+	public function file_fingerprint( $absolute_path, $legacy = false ) {
 		if ( !file_exists( $absolute_path ) ) return null;
 		if ( !is_file( $absolute_path ) || !is_readable( $absolute_path ) || is_link( $absolute_path ) ) {
 			return self::FINGERPRINT_UNSAFE;
@@ -3445,12 +3464,13 @@ class Meow_WPMC_Core {
 			return self::FINGERPRINT_UNSAFE;
 		}
 		$context = hash_init( 'sha256' );
-		hash_update( $context, wp_json_encode( array(
-			'size' => isset( $stat['size'] ) ? (int) $stat['size'] : 0,
-			'mtime' => isset( $stat['mtime'] ) ? (int) $stat['mtime'] : 0,
-			'ino' => isset( $stat['ino'] ) ? (int) $stat['ino'] : 0,
-			'dev' => isset( $stat['dev'] ) ? (int) $stat['dev'] : 0,
-		) ) );
+		$identity = array( 'size' => isset( $stat['size'] ) ? (int) $stat['size'] : 0 );
+		if ( $legacy ) {
+			$identity['mtime'] = isset( $stat['mtime'] ) ? (int) $stat['mtime'] : 0;
+			$identity['ino'] = isset( $stat['ino'] ) ? (int) $stat['ino'] : 0;
+			$identity['dev'] = isset( $stat['dev'] ) ? (int) $stat['dev'] : 0;
+		}
+		hash_update( $context, wp_json_encode( $identity ) );
 		$sample_size = 64 * 1024;
 		$first = fread( $handle, $sample_size );
 		if ( $first === false ) {
@@ -3468,10 +3488,13 @@ class Meow_WPMC_Core {
 			hash_update( $context, $last );
 		}
 		fclose( $handle );
-		return hash_final( $context );
+		return ( $legacy ? '' : 'v2:' ) . hash_final( $context );
 	}
 
-	public function validate_issue_manifest( $issue ) {
+	// $mode 'cleanup' (delete, repair) compares fingerprints. 'recover' only checks that the files
+	// are where they should be: putting a file back from the trash cannot destroy anything, and
+	// recover_file() already refuses to overwrite an existing file.
+	public function validate_issue_manifest( $issue, $mode = 'cleanup' ) {
 		$manifest = json_decode( (string) $issue->manifest, true );
 		if ( !is_array( $manifest ) ) return true;
 		foreach ( $manifest as $relative => $expected ) {
@@ -3491,7 +3514,9 @@ class Meow_WPMC_Core {
 			if ( !$existing ) return new WP_Error( 'wpmc_file_changed_since_scan', __( 'A file disappeared after the scan. Run a new scan before cleanup.', 'media-cleaner' ) );
 			// A real fingerprint that no longer matches — including a file that has since
 			// become unsafe and now returns the sentinel — means the file changed.
-			$current = $this->file_fingerprint( $existing );
+			if ( $mode === 'recover' ) continue;
+			$legacy = strpos( (string) $expected, 'v2:' ) !== 0;
+			$current = $this->file_fingerprint( $existing, $legacy );
 			if ( !hash_equals( (string) $expected, (string) $current ) ) {
 				return new WP_Error( 'wpmc_file_changed_since_scan', __( 'A file changed after the scan. Run a new scan before cleanup.', 'media-cleaner' ) );
 			}
@@ -3865,7 +3890,7 @@ class Meow_WPMC_Core {
 			'filesystem_content' => true,
 			'media_library' => false,
 			'live_content' => false,
-			'debuglogs' => false,
+			'debuglogs' => true,
 			'images_only' => false,
 			'attach_is_use' => false,
 			'thumbnails_only' => false,

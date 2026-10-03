@@ -2392,8 +2392,8 @@ class Meow_WPMC_Rest
 			$requires_identity = in_array( $operation, array( 'delete', 'recover', 'repair' ), true );
 			if ( $requires_identity && empty( $manifest['identity_validated'] ) ) {
 				$issue = isset( $issue ) && $issue ? $issue : $this->core->get_issue( $id );
-				$identity = $issue ? $this->core->timed( 'validate_issue_manifest', function () use ( $issue ) {
-					return $this->core->validate_issue_manifest( $issue );
+				$identity = $issue ? $this->core->timed( 'validate_issue_manifest', function () use ( $issue, $operation ) {
+					return $this->core->validate_issue_manifest( $issue, $operation === 'recover' ? 'recover' : 'cleanup' );
 				} ) : new WP_Error( 'wpmc_issue_missing', __( 'The selected Media Cleaner result no longer exists.', 'media-cleaner' ) );
 				if ( is_wp_error( $identity ) ) {
 					$this->core->runs->update_operation( $journal->id, 'failed', $manifest, $identity );
