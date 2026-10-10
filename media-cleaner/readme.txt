@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.3.0
+Stable tag: 7.3.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,13 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.3.1 (2026/10/10) =
+* Add: A Scan button directly in the notice shown when deleting requires a new scan.
+* Add: Hook tracing and reporting to analyze performance during long cleanup requests.
+* Update: Scan error messages are clearer and suggest using smaller buffers and a delay when the server times out.
+* Fix: Trash deletion now uses your file buffer setting instead of a placeholder value.
+* Fix: Timeouts during a scan are now handled by the scanner itself instead of surfacing as raw errors.
 
 = 7.3.0 (2026/10/03) =
 * Update: Debug logs are now enabled by default; existing settings are kept.

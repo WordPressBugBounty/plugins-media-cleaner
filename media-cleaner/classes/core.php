@@ -1722,44 +1722,172 @@ class Meow_WPMC_Core {
 		$this->log( '→ ' . $label );
 		$started = microtime( true );
 		$queries = $wpdb->num_queries;
-		$result = $callback();
+		$trace = $runs_hooks ? $this->trace_hooks() : null;
+		try {
+			$result = $callback();
+		}
+		finally {
+			// Never leave the listeners behind, even when the call throws.
+			if ( $trace ) $this->untrace_hooks( $trace );
+		}
 		$elapsed = microtime( true ) - $started;
 		$spent = $wpdb->num_queries - $queries;
 		if ( $elapsed >= 0.25 ) {
 			$this->log( sprintf( '🐌 %s (cleanup) took %.2fs, %d queries', $label, $elapsed, $spent ) );
 		}
-		if ( $runs_hooks ) $this->warn_if_hooks_are_slow( $label, $elapsed, $spent );
+		if ( $runs_hooks ) $this->report_slow_hooks( $label, $trace, $elapsed );
 		return $result;
+	}
+
+	// While a hooked WordPress call runs, every hook it fires is timestamped and every outgoing
+	// HTTP request is timed. The silence after a hook is spent in its callbacks (or in the
+	// WordPress code right after it, such as the unlink that follows wp_delete_file), and the
+	// callbacks' source files say which plugin they belong to. wpdb fires "query" just before
+	// each statement, so the silence after it is that query running: measured, not inferred.
+	private function trace_hooks() {
+		$trace = (object) array( 'marks' => array(), 'http' => array(), 'http_started' => 0, 'listeners' => array() );
+		$trace->listeners['all'] = function ( $hook, $arg = null ) use ( $trace ) {
+			// ponytail: capped so a hook-heavy site cannot grow this without bound; the gaps that matter are still found.
+			if ( count( $trace->marks ) >= 50000 ) return;
+			$query = $hook === 'query' && is_string( $arg ) ? array( $arg, $this->query_source() ) : null;
+			$trace->marks[] = array( $hook, microtime( true ), $query );
+		};
+		$trace->listeners['pre_http_request'] = function ( $pre ) use ( $trace ) {
+			$trace->http_started = microtime( true );
+			return $pre;
+		};
+		$trace->listeners['http_api_debug'] = function ( $response, $context, $class, $args, $url ) use ( $trace ) {
+			$trace->http[] = array( wp_parse_url( $url, PHP_URL_HOST ), microtime( true ) - $trace->http_started );
+		};
+		add_action( 'all', $trace->listeners['all'] );
+		add_filter( 'pre_http_request', $trace->listeners['pre_http_request'], PHP_INT_MAX );
+		add_action( 'http_api_debug', $trace->listeners['http_api_debug'], 10, 5 );
+		$trace->started = microtime( true );
+		return $trace;
+	}
+
+	private function untrace_hooks( $trace ) {
+		$trace->ended = microtime( true );
+		foreach ( $trace->listeners as $hook => $listener ) {
+			remove_filter( $hook, $listener, $hook === 'pre_http_request' ? PHP_INT_MAX : 10 );
+		}
+	}
+
+	// Who sent the query: the innermost plugin or theme on the stack. Reaching Media Cleaner's own
+	// frames first means nothing hooked in between, so the query is WordPress's own work inside the
+	// call Media Cleaner made — saying "media-cleaner" there would blame us for core's queries.
+	private function query_source() {
+		$frames = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS );
+		$own = wp_normalize_path( dirname( __DIR__ ) );
+		foreach ( $frames as $index => $frame ) {
+			$file = isset( $frame['file'] ) ? wp_normalize_path( $frame['file'] ) : '';
+			if ( $file === '' || strpos( $file, '/wp-includes/' ) !== false ) continue;
+			if ( strpos( $file, $own ) === 0 ) return 'WordPress';
+			if ( !preg_match( '#/(plugins|mu-plugins|themes)/([^/]+)#', $file, $match ) ) continue;
+			$caller = isset( $frames[ $index + 1 ] ) ? $frames[ $index + 1 ] : array();
+			$function = ( isset( $caller['class'] ) ? $caller['class'] . '::' : '' ) . ( isset( $caller['function'] ) ? $caller['function'] : '' );
+			return ( $match[1] === 'themes' ? 'theme ' . $match[2] : $match[2] ) . ( $function ? " ($function)" : '' );
+		}
+		return 'WordPress';
+	}
+
+	// "plugin-folder: function" for every callback on a hook, so the log names the code.
+	private function describe_hook_callbacks( $hook ) {
+		global $wp_filter;
+		if ( empty( $wp_filter[ $hook ] ) ) return 'nothing (the time is WordPress itself, or the server: disk or network storage)';
+		$names = array();
+		foreach ( $wp_filter[ $hook ]->callbacks as $callbacks ) {
+			foreach ( $callbacks as $callback ) {
+				$function = $callback['function'];
+				try {
+					if ( is_array( $function ) ) {
+						$reflection = new ReflectionMethod( $function[0], $function[1] );
+						$name = ( is_object( $function[0] ) ? get_class( $function[0] ) : $function[0] ) . '::' . $function[1];
+					}
+					else if ( is_string( $function ) && strpos( $function, '::' ) !== false ) {
+						$reflection = new ReflectionMethod( $function );
+						$name = $function;
+					}
+					else {
+						$reflection = new ReflectionFunction( $function );
+						$name = is_string( $function ) ? $function : '{closure}';
+					}
+					$file = wp_normalize_path( (string) $reflection->getFileName() );
+				}
+				catch ( Throwable $e ) {
+					$name = is_object( $function ) ? get_class( $function ) : '?';
+					$file = '';
+				}
+				$source = 'WordPress';
+				if ( preg_match( '#/(plugins|mu-plugins|themes)/([^/]+)#', $file, $match ) ) {
+					$source = $match[1] === 'themes' ? 'theme ' . $match[2] : $match[2];
+				}
+				$names[] = $source . ': ' . $name;
+			}
+		}
+		return implode( ', ', array_unique( $names ) );
 	}
 
 	// Deleting one file should not take seconds. When it does, the time is almost never Media
 	// Cleaner's — wp_delete_attachment and wp_update_post run every callback the site has hooked to
 	// them — but the person watching sees it happen inside Media Cleaner and reasonably concludes it
-	// is Media Cleaner. Saying so plainly, once, is the difference between a support ticket and a
-	// setting they can change themselves.
-	//
-	// The query count is what makes this honest rather than a guess: time spent across many queries
-	// is the database, and time spent across almost none is code running between them.
-	private function warn_if_hooks_are_slow( $label, $elapsed, $queries ) {
+	// is Media Cleaner. Saying where it went, by name, is the difference between a support ticket
+	// and a setting they can change themselves. This used to guess the database's share from the
+	// query count, and blamed plugins for a single 27s DELETE on a huge wp_postmeta table.
+	private function report_slow_hooks( $label, $trace, $elapsed ) {
 		if ( $elapsed < 5 || $this->slow_hook_warned ) return;
 		$this->slow_hook_warned = true;
-		// Could the queries plausibly account for the time? Half the elapsed time, at a generous
-		// 50ms a query, is the bar. Below it the work is happening between the queries rather than
-		// in them — and that is code, not the database. Judging on time-per-query instead got this
-		// backwards for a fast database running hundreds of queries for a single file.
-		if ( $queries * 0.05 >= $elapsed * 0.5 ) {
+		$by_hook = array();
+		$database = 0;
+		$sources = array();
+		$marks = array_merge( array( array( '(start)', $trace->started, null ) ), $trace->marks );
+		foreach ( $marks as $index => $mark ) {
+			$gap = ( isset( $marks[ $index + 1 ] ) ? $marks[ $index + 1 ][1] : $trace->ended ) - $mark[1];
+			$by_hook[ $mark[0] ] = ( isset( $by_hook[ $mark[0] ] ) ? $by_hook[ $mark[0] ] : 0 ) + $gap;
+			if ( $mark[0] !== 'query' ) continue;
+			$database += $gap;
+			list( $sql, $source ) = $mark[2] ? $mark[2] : array( '', 'WordPress' );
+			if ( !isset( $sources[ $source ] ) ) $sources[ $source ] = array( 0, 0, 0, '' );
+			$sources[ $source ][0] += $gap;
+			$sources[ $source ][1]++;
+			if ( $gap > $sources[ $source ][2] ) {
+				$sources[ $source ][2] = $gap;
+				$sources[ $source ][3] = $sql;
+			}
+		}
+		if ( $database >= $elapsed * 0.5 ) {
 			$this->log( sprintf(
-				/* translators: 1: WordPress function, 2: seconds, 3: number of queries */
-				__( '⚠ %1$s took %2$.1fs for one file, across %3$d database queries. That time is going into the database, not into Media Cleaner. A very large wp_postmeta table is the usual cause — worth asking your host to look at it.', 'media-cleaner' ),
-				$label, $elapsed, $queries
+				/* translators: 1: WordPress function, 2: seconds, 3: seconds in the database */
+				__( '⚠ %1$s took %2$.1fs, %3$.1fs of it in the database. Queries by who sent them:', 'media-cleaner' ),
+				$label, $elapsed, $database
 			) );
+			uasort( $sources, function ( $a, $b ) { return $b[0] <=> $a[0]; } );
+			foreach ( array_slice( $sources, 0, 3, true ) as $source => $stats ) {
+				if ( $stats[0] < 1 ) break;
+				$this->log( sprintf( '🐢 %.1fs in %d queries from %s. Slowest (%.1fs): %s',
+					$stats[0], $stats[1], $source, $stats[2], preg_replace( '/\s+/', ' ', substr( $stats[3], 0, 300 ) ) ) );
+			}
 			return;
 		}
 		$this->log( sprintf(
-			/* translators: 1: WordPress function, 2: seconds, 3: number of queries */
-			__( '⚠ %1$s took %2$.1fs for one file but ran only %3$d database queries, so the time is not Media Cleaner and not the database: it is another plugin hooked to this deletion. Image optimisers, CDN and backup plugins usually contact their service once per file. Deactivate those while you clean up, then turn them back on.', 'media-cleaner' ),
-			$label, $elapsed, $queries
+			/* translators: 1: WordPress function, 2: seconds, 3: seconds in the database */
+			__( '⚠ %1$s took %2$.1fs, only %3$.1fs of it in the database. The rest went to code hooked to it, or to slow storage:', 'media-cleaner' ),
+			$label, $elapsed, $database
 		) );
+		unset( $by_hook['query'] );
+		arsort( $by_hook );
+		foreach ( array_slice( $by_hook, 0, 3, true ) as $hook => $seconds ) {
+			if ( $seconds < 1 ) break;
+			$this->log( sprintf( '🔎 %.1fs after "%s" fired. Hooked to it: %s', $seconds, $hook, $this->describe_hook_callbacks( $hook ) ) );
+		}
+		$hosts = array();
+		foreach ( $trace->http as $call ) {
+			$host = $call[0] ? $call[0] : '?';
+			$hosts[ $host ] = array( ( isset( $hosts[ $host ] ) ? $hosts[ $host ][0] : 0 ) + 1, ( isset( $hosts[ $host ] ) ? $hosts[ $host ][1] : 0 ) + $call[1] );
+		}
+		foreach ( $hosts as $host => $call ) {
+			$this->log( sprintf( '🌐 %d HTTP request(s) to %s took %.1fs.', $call[0], $host, $call[1] ) );
+		}
 	}
 
 	private function forget_stale_trash_rows( $id ) {

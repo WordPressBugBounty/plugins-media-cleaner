@@ -736,7 +736,9 @@ class Meow_WPMC_Rest
 					'medias_buffer' => $severely_constrained ? 10 : ( $profile_constrained ? 25 : 100 ),
 					'analysis_buffer' => $severely_constrained ? 10 : ( $profile_constrained ? 25 : 100 ),
 					'file_buffer' => $severely_constrained ? 25 : ( $profile_constrained ? 100 : 500 ),
-					'cleanup_buffer' => $severely_constrained ? 5 : ( $profile_constrained ? 10 : 20 ),
+					// A healthy server leaves the size to the File Operation Buffer setting; each batch
+					// already yields on its own time budget, so a hidden cap only overrode the user.
+					'cleanup_buffer' => $severely_constrained ? 5 : ( $profile_constrained ? 10 : 100 ),
 					'base_delay_ms' => $base_delay_ms,
 					'max_retries' => 4,
 					// The work budget is soft: it is only read between parsers, so one slow third-party
@@ -2339,13 +2341,34 @@ class Meow_WPMC_Rest
 			return $this->error_response( new WP_Error( 'wpmc_invalid_operation_items', __( 'Cleanup requests must contain between 1 and 100 valid items.', 'media-cleaner' ), array( 'status' => 400 ) ) );
 		}
 		$request_key = isset( $params['requestKey'] ) ? sanitize_text_field( $params['requestKey'] ) : wp_generate_uuid4();
+		global $wpdb;
+		// One request at a time per operation. A delete can outlive the browser's patience
+		// (another plugin hooked to wp_delete_attachment can hold it for minutes), and the
+		// replay then arrived while the first request was still deleting: the item was only
+		// 'running' in the journal, so it ran a second time in parallel. The replay now waits
+		// here and hands back an empty, unfinished batch so the browser asks again. MySQL
+		// releases the lock if the worker dies, so a crashed request never strands it.
+		$lock = 'wpmc_op_' . md5( $request_key );
+		if ( $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 20)', $lock ) ) === '0' ) {
+			return new WP_REST_Response( array(
+				'success' => true,
+				'data' => array(
+					'results' => array(),
+					'succeeded' => 0,
+					'failed' => 0,
+					'request_key' => $request_key,
+					'finished' => false,
+					'remaining' => count( $ids ),
+				),
+				'message' => __( 'The previous request is still working on these items.', 'media-cleaner' ),
+			), 200 );
+		}
 		$results = array();
 		$succeeded = 0;
 		$failed = 0;
 		$attempted = 0;
 		$yielded = false;
 		$this->core->timeout_check_start( count( $ids ) );
-		global $wpdb;
 		$started_queries = $wpdb->num_queries;
 		// Cleanup used to be silent. A batch that never came back left nothing behind to read —
 		// no response, so no support bundle either — and the only way to see where the time went
@@ -2448,6 +2471,8 @@ class Meow_WPMC_Rest
 			$this->core->log( sprintf( '🍀 Yielded with %d of %d items left for the next request.',
 				max( 0, count( $ids ) - $attempted ), count( $ids ) ) );
 		}
+
+		$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
 
 		$response = array(
 			'success' => $failed === 0,
