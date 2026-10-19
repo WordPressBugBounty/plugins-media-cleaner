@@ -15,6 +15,13 @@ if ( !class_exists( 'Meow_WPMC_Transient_Exception', false ) ) {
 	}
 }
 
+// Thrown when third-party code calls wp_redirect() while a parser runs. Left alone, the
+// redirect turns the scan request into a 302 to a front-end page, which the dashboard can
+// only report as an unreadable response with no hint of the post or plugin at fault.
+if ( !class_exists( 'Meow_WPMC_Redirect_Exception', false ) ) {
+	class Meow_WPMC_Redirect_Exception extends RuntimeException {}
+}
+
 class Meow_WPMC_Core {
 
 	// A file that exists but cannot be safely fingerprinted
@@ -240,7 +247,10 @@ class Meow_WPMC_Core {
 					$previous_guard_label = $this->parser_query_guard_label;
 					$this->parser_query_guard_active = true;
 					$this->parser_query_guard_label = $callback_name;
-					if ( !$guard_was_active ) add_filter( 'query', array( $this, 'guard_parser_query' ), PHP_INT_MAX );
+					if ( !$guard_was_active ) {
+						add_filter( 'query', array( $this, 'guard_parser_query' ), PHP_INT_MAX );
+						add_filter( 'wp_redirect', array( $this, 'refuse_parser_redirect' ), PHP_INT_MAX );
+					}
 					try {
 						$this->timeout_check();
 						call_user_func_array( $function, $call_args );
@@ -265,7 +275,10 @@ class Meow_WPMC_Core {
 					finally {
 						$this->parser_query_guard_active = $guard_was_active;
 						$this->parser_query_guard_label = $previous_guard_label;
-						if ( !$guard_was_active ) remove_filter( 'query', array( $this, 'guard_parser_query' ), PHP_INT_MAX );
+						if ( !$guard_was_active ) {
+							remove_filter( 'query', array( $this, 'guard_parser_query' ), PHP_INT_MAX );
+							remove_filter( 'wp_redirect', array( $this, 'refuse_parser_redirect' ), PHP_INT_MAX );
+						}
 					}
 					$elapsed = microtime( true ) - $started;
 					// A single slow parser is what burns a scan batch, and the timeout report can only
@@ -303,6 +316,10 @@ class Meow_WPMC_Core {
 		$origin = $file . ':' . $root->getLine();
 		error_log( 'Media Cleaner: parser failure at ' . $origin . ' => ' . $root->getMessage() . "\n" . $root->getTraceAsString() );
 		return $origin;
+	}
+
+	public function refuse_parser_redirect( $location ) {
+		throw new Meow_WPMC_Redirect_Exception( sprintf( __( 'Attempted to redirect to %s.', 'media-cleaner' ), $location ) );
 	}
 
 	public function guard_parser_query( $query ) {
@@ -411,6 +428,10 @@ class Meow_WPMC_Core {
 	private $wordpress_init_time = 0.5;
 	private $max_execution_time;
 	private $items_checked = 0;
+	// Unlike items_checked, not reset per batch: a REST request can run several batches,
+	// and only its very first item gets the extended ceiling and fails instead of
+	// yielding. WP-CLI has no request, so there each batch keeps counting as a fresh one.
+	private $request_items = 0;
 	private $items_count = 0;
 
 	function get_max_execution_time() {
@@ -426,6 +447,12 @@ class Meow_WPMC_Core {
 			$this->max_execution_time = 5;
 
 		return $this->max_execution_time;
+	}
+
+	// How long a scan request keeps taking batches before it answers. Short enough to stay far
+	// from any server or proxy limit, long enough that the request overhead stops dominating.
+	public function batch_time_target() {
+		return min( 5, $this->get_request_time_budget() / 4 );
 	}
 
 	public function get_request_time_budget() {
@@ -558,7 +585,7 @@ class Meow_WPMC_Core {
 		if ( empty( $this->start_time ) ) $this->start_time = $now;
 		$this->time_elapsed = $now - $this->start_time;
 		$this->time_remaining = $this->get_request_time_budget() - ( $now - $this->request_start_time );
-		$budget = $this->items_checked === 0 ? $this->get_item_time_ceiling() : null;
+		$budget = $this->is_first_request_item() ? $this->get_item_time_ceiling() : null;
 		if ( $this->catch_timeout && $this->timeout_should_yield( $budget ) ) {
 				error_log("Media Cleaner Timeout! Check the Media Cleaner logs for more info.");
 				$this->log( "😵 Timeout! Some info for debug:" );
@@ -606,8 +633,13 @@ class Meow_WPMC_Core {
 		}
 	}
 
+	public function is_first_request_item() {
+		return ( $this->is_cli ? $this->items_checked : $this->request_items ) === 0;
+	}
+
 	function timeout_check_additem() {
 		$this->items_checked++;
+		$this->request_items++;
 		$this->time_elapsed = microtime( true ) - $this->start_time;
 		$this->item_scan_avg_time = ceil( ( $this->time_elapsed / $this->items_checked ) * 10 ) / 10;
 	}
@@ -960,7 +992,17 @@ class Meow_WPMC_Core {
 
 		// Resolve src-set and shortcodes
 		if ( $this->get_shortcode_analysis() ) {
-			$html = do_shortcode( $html );
+			// Access-control shortcodes (LMS, membership) redirect visitors who may not see the
+			// content. The scan is such a visitor, so keep the unrendered HTML: its own URLs and
+			// shortcode attributes are still analysed, only that shortcode's output is lost.
+			$level = ob_get_level();
+			try {
+				$html = do_shortcode( $html );
+			}
+			catch ( Meow_WPMC_Redirect_Exception $e ) {
+				while ( ob_get_level() > $level ) ob_end_clean();
+				$this->log( '⚠️ A shortcode tried to redirect, so it was not rendered. ' . $e->getMessage() );
+			}
 			if ( $this->analysis_document_too_large( $html ) ) {
 				return array();
 			}
@@ -3920,16 +3962,16 @@ class Meow_WPMC_Core {
 			_e( "Not found in content", 'media-cleaner' );
 		}
 		else if ( $issue == 'ORPHAN_FILE' ) {
-			_e( "Not in Library", 'media-cleaner' );
+			_e( "Not in library", 'media-cleaner' );
 		}
 		else if ( $issue == 'ORPHAN_RETINA' ) {
-			_e( "Orphan Retina", 'media-cleaner' );
+			_e( "Retina copy without original", 'media-cleaner' );
 		}
 		else if ( $issue == 'ORPHAN_WEBP' ) {
-			_e( "Orphan WebP", 'media-cleaner' );
+			_e( "WebP copy without original", 'media-cleaner' );
 		}
 		else if ( $issue == 'ORPHAN_MEDIA' ) {
-			_e( "No attached file", 'media-cleaner' );
+			_e( "File missing", 'media-cleaner' );
 		}
 		else {
 			echo $issue;
@@ -4388,24 +4430,9 @@ function wpmc_remove_database() {
 */
 
 function wpmc_install() {
-	$previous_schema = (int) get_option( Meow_WPMC_Runs::SCHEMA_OPTION, 0 );
-	wpmc_create_database();
-	$runs = new Meow_WPMC_Runs( null );
-	if ( $runs->tables_exist( true ) ) {
-		if ( $previous_schema < 2 ) {
-			delete_transient( 'wpmc_progress' );
-		}
-		// Schema 2 to 4 force-disabled shortcode analysis, which caused false
-		// positives for rendered shortcodes (Foo Gallery and others). Undo it once.
-		if ( $previous_schema >= 2 && $previous_schema < 5 ) {
-			$options = get_option( 'wpmc_options', array() );
-			if ( is_array( $options ) && !empty( $options['shortcodes_disabled'] ) ) {
-				$options['shortcodes_disabled'] = false;
-				update_option( 'wpmc_options', $options, false );
-			}
-		}
-		update_option( Meow_WPMC_Runs::SCHEMA_OPTION, Meow_WPMC_Runs::SCHEMA_VERSION, false );
-	}
+	// The same upgrade as every admin or REST request runs. Keeping a copy of the migrations here
+	// is how activation used to stamp the schema version without running the newer ones.
+	( new Meow_WPMC_Runs( null ) )->maybe_upgrade();
 }
 
 function wpmc_reset () {

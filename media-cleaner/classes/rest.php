@@ -941,6 +941,7 @@ class Meow_WPMC_Rest
 		$limitsize = $this->core->get_option( 'posts_buffer' );
 		$finished = false;
 		$processed = 0;
+		$chunk = null; // the last batch, when several are taken in one request
 		$message = ""; // will be filled by extractRefsFrom...
 
 		// Randomly throw an exception timeout
@@ -957,22 +958,21 @@ class Meow_WPMC_Rest
 			), $run->id, 'extractReferences' );
 		}
 
-		if ( $source === 'content' ) {
-			$finished = $this->engine->extractRefsFromContent( $limit, $limitsize, $message, $post_id, $processed );
-		}
-		else if ( $source === 'media' ) {
-			$finished = $this->engine->extractRefsFromLibrary( $limit, $limitsize, $message, $post_id, $processed );
-		}else if ( $source === 'duplicates' ) {
-			$finished = $this->engine->extractRefsFromDuplicates( $limit, $limitsize, $message, $post_id, $processed );
-		} else if( $source === 'thumbnails' ) {
-			$finished = $this->engine->extractRefsFromThumbnails( $limit, $limitsize, $message, $post_id, $processed );
-		}
-		else if ( $source === 'translations' ) {
+		$extractors = array(
+			'content' => 'extractRefsFromContent',
+			'media' => 'extractRefsFromLibrary',
+			'duplicates' => 'extractRefsFromDuplicates',
+			'thumbnails' => 'extractRefsFromThumbnails',
+			'translations' => 'extractRefsFromTranslations',
+		);
+		if ( $source === 'translations' ) {
 			// posts_buffer is sized for parsing a post, which is orders of magnitude dearer than
 			// looking a URL up. Paging this phase that small would cost hundreds of round trips to
 			// do a few seconds of work.
 			$limitsize = min( 2000, max( 200, 10 * (int) $this->core->get_option( 'analysis_buffer' ) ) );
-			$finished = $this->engine->extractRefsFromTranslations( $limit, $limitsize, $message, $post_id, $processed );
+		}
+		if ( isset( $extractors[ $source ] ) ) {
+			$finished = $this->engine->extract_in_batches( $extractors[ $source ], $limit, $limitsize, $message, $post_id, $processed, $chunk );
 		}
 		else {
 			return $this->fail_run_response( new WP_Error(
@@ -999,7 +999,7 @@ class Meow_WPMC_Rest
 				'limit' => $limit + $processed,
 				'finished' => $finished,
 				'checked' => $processed,
-				'yielded' => !$finished && $processed < $limitsize,
+				'yielded' => !$finished && ( $chunk ?? $processed ) < $limitsize,
 			]
 		];
 
@@ -1029,6 +1029,7 @@ class Meow_WPMC_Rest
 		$finished = count( $hashes ) < $limit;
 		$processed = 0;
 		$yielded = false;
+		$progressed = false;
 		$this->core->timeout_check_start( count( $hashes ) );
 		foreach ( $hashes as $hash ) {
 			if ( $this->core->timeout_should_yield() ) {
@@ -1036,7 +1037,12 @@ class Meow_WPMC_Rest
 				break;
 			}
 			$this->core->timeout_check();
-			$this->engine->check_duplicates( $hash );
+			// False means the group was too big for what is left of this request; it did progress.
+			if ( !$this->engine->check_duplicates( $hash, true ) ) {
+				$yielded = true;
+				$progressed = true;
+				break;
+			}
 			$this->core->timeout_check_additem();
 			$processed++;
 		}
@@ -1051,6 +1057,7 @@ class Meow_WPMC_Rest
 				'offset' => $offset + $processed,
 				'finished' => $finished,
 				'yielded' => $yielded,
+				'progressed' => $processed > 0 || $progressed,
 			],
 		];
 
@@ -1253,22 +1260,29 @@ class Meow_WPMC_Rest
 			$this->core->save_progress( 'retrieveMedia' );
 		}
 		
-		$results = $this->engine->get_media_entries( $limit, $limitsize, $unattachedOnly );
-		$finished = count( $results ) < $limitsize;
+		// Pages keep coming for a few seconds, like the reference batches: a media check
+		// is cheap next to the cost of a request.
 		$processed = 0;
 		$yielded = false;
-		$this->core->timeout_check_start( count( $results ) );
-		foreach ( $results as $media_id ) {
-			if ( $this->core->timeout_should_yield() ) {
-				$yielded = true;
-				break;
+		$finished = false;
+		$started = microtime( true );
+		$this->core->timeout_check_start( $limitsize );
+		do {
+			$results = $this->engine->get_media_entries( $limit + $processed, $limitsize, $unattachedOnly );
+			$page = 0;
+			foreach ( $results as $media_id ) {
+				if ( $this->core->timeout_should_yield() ) {
+					$yielded = true;
+					break;
+				}
+				$this->core->timeout_check();
+				$this->engine->check_media( $media_id );
+				$this->core->timeout_check_additem();
+				$processed++;
+				$page++;
 			}
-			$this->core->timeout_check();
-			$this->engine->check_media( $media_id );
-			$this->core->timeout_check_additem();
-			$processed++;
-		}
-		$finished = !$yielded && $processed === count( $results ) && $finished;
+			$finished = !$yielded && $page === count( $results ) && count( $results ) < $limitsize;
+		} while ( !$finished && !$yielded && microtime( true ) - $started < $this->core->batch_time_target() );
 		$next_offset = $limit + $processed;
 		$message = sprintf( __( "Retrieved %d targets.", 'media-cleaner' ), $processed );
 
@@ -2042,8 +2056,22 @@ class Meow_WPMC_Rest
 			$run_id, $hash
 		) );
 
+		// Only the first copies are described: each one costs several queries, so a group of
+		// thousands (a placeholder uploaded again and again) never loaded, and nobody compares
+		// thousands of cards anyway. The copy that was clicked is always among them.
+		$total = count( $copies );
+		$shown = array_slice( $copies, 0, 50 );
+		if ( !in_array( $entry->path, array_map( function ( $copy ) { return (string) $copy->mediaUrl; }, $shown ), true ) ) {
+			foreach ( $copies as $copy ) {
+				if ( (string) $copy->mediaUrl === $entry->path ) {
+					$shown[ count( $shown ) - 1 ] = $copy;
+					break;
+				}
+			}
+		}
+
 		$results = array();
-		foreach ( $copies as $copy ) {
+		foreach ( $shown as $copy ) {
 			$results[] = $this->build_duplicate_copy( (string) $copy->mediaUrl, (int) $copy->mediaId, $run_id );
 		}
 
@@ -2052,6 +2080,7 @@ class Meow_WPMC_Rest
 			'data' => array(
 				'hash' => substr( (string) $hash, 5 ),
 				'currentId' => (int) $entry->id,
+				'total' => $total,
 				'copies' => $results,
 			),
 		), 200 );
@@ -2136,15 +2165,28 @@ class Meow_WPMC_Rest
 
 		// Where this copy is used. Same test as the duplicate analysis itself, so the modal can
 		// never disagree with the issue it was opened from.
-		$where = $wpdb->prepare(
-			"FROM $table_refs
-			WHERE run_id = %d AND originType NOT LIKE 'HASH:%%'
-			AND ((%d > 0 AND mediaId = %d) OR (mediaUrl_hash = %s AND mediaUrl = %s))",
-			$run_id, $media_id, $media_id, hash( 'sha256', $path ), $path
+		// Two lookups joined by UNION rather than one OR: with the OR, MySQL could use neither the
+		// mediaId nor the URL index and scanned the table for every copy (about 0.15s each).
+		$by_url = $wpdb->prepare(
+			"SELECT id, originType, origin FROM $table_refs
+			WHERE run_id = %d AND originType NOT LIKE 'HASH:%%' AND mediaUrl_hash = %s AND mediaUrl = %s",
+			$run_id, hash( 'sha256', $path ), $path
 		);
-		$copy['referenceCount'] = (int) $wpdb->get_var( "SELECT COUNT(*) $where" );
+		$union = $by_url;
+		if ( $media_id > 0 ) {
+			$union = $wpdb->prepare(
+				"SELECT id, originType, origin FROM $table_refs
+				WHERE run_id = %d AND originType NOT LIKE 'HASH:%%' AND mediaId = %d",
+				$run_id, $media_id
+			) . " UNION $by_url";
+		}
+		// One line per place: a post often references the same file twice (by URL and by ID).
+		// Counted from the grouped rows: COUNT(DISTINCT a, b) skips rows where origin is NULL, which
+		// many references have (Media Library, theme, WooCommerce placeholder), and showed them as unused.
+		$copy['referenceCount'] = (int) $wpdb->get_var( "SELECT COUNT(*) FROM (SELECT 1 FROM ($union) AS refs GROUP BY originType, origin) AS places" );
 		if ( $copy['referenceCount'] > 0 ) {
-			$references = $wpdb->get_results( "SELECT originType, origin $where ORDER BY id ASC LIMIT 20" );
+			$references = $wpdb->get_results( "SELECT originType, origin FROM ($union) AS refs
+				GROUP BY originType, origin ORDER BY MIN(id) ASC LIMIT 20" );
 			foreach ( $references as $reference ) {
 				$origin = (string) $reference->origin;
 				$post_id = is_numeric( $origin ) ? (int) $origin : 0;

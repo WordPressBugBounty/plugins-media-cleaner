@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.3.1
+Stable tag: 7.3.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,18 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.3.2 (2026/10/19) =
+* Update: Scans now run many times faster by processing several batches per request.
+* Update: Reworded the buffer settings and the overload hint, since a request now covers several batches instead of one.
+* Update: The dashboard is calmer for first-time users.
+* Update: The free version now names the page builders it cannot read and points to Pro.
+* Update: The Free badge and logo in the plugin header now link to the Pro page.
+* Update: Expired licenses now get a grace period with retries, license keys are normalized, and an Activate License notice was added.
+* Update: Pro links inside Media Cleaner now indicate where they were clicked from.
+* Fix: Start Over now works after an interrupted scan.
+* Fix: Scans are no longer interrupted when something triggers a redirect.
+* Fix: Results from a scan made with the free version no longer unlock deletions after switching to Pro.
 
 = 7.3.1 (2026/10/10) =
 * Add: A Scan button directly in the notice shown when deleting requires a new scan.

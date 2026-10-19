@@ -515,13 +515,13 @@ class Meow_WPMC_MCP {
 					$this->core->save_progress( 'resetIssuesAndReferences' );
 					break;
 				case 'extractReferencesFromContent':
-					$step_finished = $engine->extractRefsFromContent( $offset, (int) $this->core->get_option( 'posts_buffer' ), $message, null, $processed );
+					$step_finished = $engine->extract_in_batches( 'extractRefsFromContent', $offset, (int) $this->core->get_option( 'posts_buffer' ), $message, null, $processed );
 					break;
 				case 'extractReferencesFromMedia':
-					$step_finished = $engine->extractRefsFromLibrary( $offset, (int) $this->core->get_option( 'posts_buffer' ), $message, null, $processed );
+					$step_finished = $engine->extract_in_batches( 'extractRefsFromLibrary', $offset, (int) $this->core->get_option( 'posts_buffer' ), $message, null, $processed );
 					break;
 				case 'extractReferencesFromDuplicates':
-					$step_finished = $engine->extractRefsFromDuplicates( $offset, (int) $this->core->get_option( 'medias_buffer' ), $message, null, $processed );
+					$step_finished = $engine->extract_in_batches( 'extractRefsFromDuplicates', $offset, (int) $this->core->get_option( 'medias_buffer' ), $message, null, $processed );
 					break;
 				case 'retrieveTargets':
 					$result = $this->step_retrieve_targets( $run, $offset, $processed );
@@ -612,16 +612,27 @@ class Meow_WPMC_MCP {
 		$engine = $this->core->engine;
 		$processed = 0;
 		if ( $run->method === 'media' ) {
+			// Pages keep coming for a few seconds, as on the dashboard: one page per call made an
+			// assistant spend a hundred tool calls on a library of ten thousand media.
 			$buffer = (int) $this->core->get_option( 'medias_buffer' );
-			$ids = $engine->get_media_entries( $offset, $buffer, $this->core->get_option( 'attach_is_use' ) );
-			$this->core->timeout_check_start( count( $ids ) );
-			foreach ( $ids as $media_id ) {
-				if ( $this->core->timeout_should_yield() ) break;
-				$engine->check_media( $media_id );
-				$this->core->timeout_check_additem();
-				$processed++;
-			}
-			$finished = count( $ids ) < $buffer && $processed === count( $ids );
+			$started = microtime( true );
+			$this->core->timeout_check_start( $buffer );
+			do {
+				$ids = $engine->get_media_entries( $offset + $processed, $buffer, $this->core->get_option( 'attach_is_use' ) );
+				$page = 0;
+				$yielded = false;
+				foreach ( $ids as $media_id ) {
+					if ( $this->core->timeout_should_yield() ) {
+						$yielded = true;
+						break;
+					}
+					$engine->check_media( $media_id );
+					$this->core->timeout_check_additem();
+					$processed++;
+					$page++;
+				}
+				$finished = !$yielded && $page === count( $ids ) && count( $ids ) < $buffer;
+			} while ( !$finished && !$yielded && microtime( true ) - $started < $this->core->batch_time_target() );
 			return array( 'finished' => $finished, 'message' => sprintf( 'Checked %d media.', $processed ) );
 		}
 		if ( $run->method === 'duplicates' ) {
@@ -810,11 +821,11 @@ class Meow_WPMC_MCP {
 	private function explain_issue_code( $code ) {
 		$codes = array(
 			'NO_CONTENT' => 'No reference was found in the content that was analyzed. It does not mean the file is unused.',
-			'ORPHAN_MEDIA' => 'This Media Library entry is not attached to any post.',
+			'ORPHAN_MEDIA' => 'The file of this Media Library entry is missing from the disk.',
 			'ORPHAN_FILE' => 'This file is in the uploads folder but not in the Media Library.',
 			'ORPHAN_RETINA' => 'This is a retina file whose original is missing.',
 			'ORPHAN_WEBP' => 'This is a WebP file whose original is missing.',
-			'DUPLICATE' => 'Another file has exactly the same content. One copy is always kept.',
+			'DUPLICATE' => 'Another file has exactly the same content. Every unused copy is listed, the first one included, so choose which one to keep before deleting.',
 			'NOT_NEEDED_THUMB' => 'This thumbnail size is not registered by the theme or WordPress anymore.',
 		);
 		return isset( $codes[ $code ] ) ? $codes[ $code ] : $code;

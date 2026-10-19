@@ -70,8 +70,8 @@ SQL;
 	// batch never reaches write_references() or save_progress(), the offset never advances, and the
 	// next request starts on the same item and fails the same way — forever, with nothing in the log
 	// to say which item is responsible. So the first item of a request is allowed to fail loudly.
-	private function fail_if_first_item( Meow_WPMC_Transient_Exception $e, $processed, $message ) {
-		if ( $processed === 0 ) {
+	private function fail_if_first_item( Meow_WPMC_Transient_Exception $e, $message ) {
+		if ( $this->core->is_first_request_item() ) {
 			throw new RuntimeException( $message, 0, $e );
 		}
 	}
@@ -113,6 +113,23 @@ SQL;
 	}
 
 	// Parse the posts for references (based on $limit and $limitsize for paging the scan)
+	// Runs one extractRefsFrom* step batch after batch until the step is done or the request has
+	// spent its time target. A post parses (or a file hashes) in milliseconds while a request costs
+	// a whole WordPress boot, so one batch of posts_buffer per request spent most of a scan on HTTP
+	// (and an AI assistant on MCP needed thousands of calls). Each batch writes its references and
+	// its checkpoint before the next one starts, and the engine still yields on the real time and
+	// memory budget, so a slow host simply stops after the first. $chunk is the last batch's size.
+	public function extract_in_batches( $extract, $limit, $limitsize, &$message, $post_id, &$processed, &$chunk = null ) {
+		$processed = 0;
+		$started = microtime( true );
+		do {
+			$finished = $this->$extract( $limit + $processed, $limitsize, $message, $post_id, $chunk );
+			$processed += $chunk;
+		} while ( !$finished && $post_id === null && $chunk === (int) $limitsize
+			&& microtime( true ) - $started < $this->core->batch_time_target() && !$this->core->timeout_should_yield() );
+		return $finished;
+	}
+
 	function extractRefsFromContent( $limit, $limitsize, &$message = '', $post_id = null, &$processed = null ) {
 		$processed = 0;
 		$method = $this->core->current_method;
@@ -178,7 +195,7 @@ SQL;
 				}
 			}
 			catch ( Meow_WPMC_Transient_Exception $e ) {
-				$this->fail_if_first_item( $e, $processed, sprintf(
+				$this->fail_if_first_item( $e, sprintf(
 					__( 'Post #%d cannot be scanned within this server request budget. Turn on the debug logs to see which parser is spending the time.', 'media-cleaner' ), $post ) );
 				$yielded = true;
 				break;
@@ -273,7 +290,7 @@ SQL;
 				$this->core->write_references();
 			}
 			catch ( Meow_WPMC_Transient_Exception $e ) {
-				$this->fail_if_first_item( $e, $processed, __( 'Translated media cannot be resolved within this server request budget.', 'media-cleaner' ) );
+				$this->fail_if_first_item( $e, __( 'Translated media cannot be resolved within this server request budget.', 'media-cleaner' ) );
 				$yielded = true;
 				break;
 			}
@@ -354,7 +371,7 @@ SQL;
 				}
 			}
 			catch ( Meow_WPMC_Transient_Exception $e ) {
-				$this->fail_if_first_item( $e, $processed, sprintf(
+				$this->fail_if_first_item( $e, sprintf(
 					__( 'Media #%d has too many sizes to check within this server request budget.', 'media-cleaner' ), $media_id ) );
 				$yielded = true;
 				break;
@@ -409,7 +426,7 @@ SQL;
 				$hash = $this->hash_file_safely( $full_path, $media );
 			}
 			catch ( Meow_WPMC_Transient_Exception $e ) {
-				$this->fail_if_first_item( $e, $processed, sprintf(
+				$this->fail_if_first_item( $e, sprintf(
 					__( 'Media #%d is too large or slow to hash within this server request budget.', 'media-cleaner' ), $media ) );
 				$yielded = true;
 				break;
@@ -500,7 +517,7 @@ SQL;
 				$this->core->add_reference_url( $paths, 'MEDIA LIBRARY' );
 			}
 			catch ( Meow_WPMC_Transient_Exception $e ) {
-				$this->fail_if_first_item( $e, $processed, sprintf(
+				$this->fail_if_first_item( $e, sprintf(
 					__( 'Media #%d cannot be read within this server request budget.', 'media-cleaner' ), $media ) );
 				$yielded = true;
 				break;
@@ -638,7 +655,9 @@ SQL;
 		STEP 3: Check the media entries (or files) against the references
 	*/
 
-	function check_duplicates( $hash ) {
+	// Returns false only when $may_yield let it stop partway through the group, after storing at
+	// least one new copy: the caller counts that as progress and asks for the same group again.
+	function check_duplicates( $hash, $may_yield = false ) {
 		// Check if the hash exists in the database
 		global $wpdb;
 		$table_name_refs = $wpdb->prefix . "mclean_refs";
@@ -658,35 +677,77 @@ SQL;
 
 		$medias = $wpdb->get_results( $request );
 
-		if( count( $medias ) <= 1 ) {
-			// No issue
-			return false;
+		if ( count( $medias ) <= 1 ) {
+			return true;
+		}
+
+		// Which copies something else references, looked up in batches rather than one query per
+		// copy: a placeholder uploaded a thousand times is a single group, and one query per copy
+		// kept that group from ever fitting in a request, so the scan stalled on it for good.
+		$table_name_scan = $wpdb->prefix . 'mclean_scan';
+		$used_ids = array();
+		$used_urls = array();
+		$stored = array();
+		foreach ( array_chunk( $medias, 500 ) as $chunk ) {
+			$ids = array_values( array_filter( array_map( function ( $media ) { return (int) $media->mediaId; }, $chunk ) ) );
+			if ( !empty( $ids ) ) {
+				$placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+				$used_ids += array_flip( $this->get_col_or_fail( $wpdb->prepare(
+					"SELECT DISTINCT mediaId FROM $table_name_refs
+					WHERE run_id = %d AND originType NOT LIKE 'HASH:%%' AND mediaId IN ($placeholders)",
+					array_merge( array( $run_id ), $ids )
+				) ) );
+			}
+			$url_hashes = array_map( function ( $media ) { return hash( 'sha256', (string) $media->mediaUrl ); }, $chunk );
+			$placeholders = implode( ',', array_fill( 0, count( $url_hashes ), '%s' ) );
+			$used_urls += array_flip( $this->get_col_or_fail( $wpdb->prepare(
+				"SELECT DISTINCT mediaUrl FROM $table_name_refs
+				WHERE run_id = %d AND originType NOT LIKE 'HASH:%%' AND mediaUrl_hash IN ($placeholders)",
+				array_merge( array( $run_id ), $url_hashes )
+			) ) );
+			// Copies already stored by an earlier request on the same group: skipped here, before
+			// add_issue() reads their file again, so picking a huge group up stays cheap.
+			$path_hashes = array_map( function ( $media ) {
+				return hash( 'sha256', $this->core->clean_uploaded_filename( (string) $media->mediaUrl ) );
+			}, $chunk );
+			$placeholders = implode( ',', array_fill( 0, count( $path_hashes ), '%s' ) );
+			$stored += array_flip( $this->get_col_or_fail( $wpdb->prepare(
+				"SELECT path FROM $table_name_scan WHERE run_id = %d AND issue = 'DUPLICATE' AND path_hash IN ($placeholders)",
+				array_merge( array( $run_id ), $path_hashes )
+			) ) );
 		}
 
 		// Every copy in the group is reported, including the first one: the analysis describes what is
-		// on the disk, it does not decide what survives.
+		// on the disk, it does not decide what survives. A huge group can outlast the request, so with
+		// $may_yield it hands back after storing at least one copy, and the next request continues.
+		$added = 0;
 		foreach ( $medias as $media ) {
-			$media_id = (int) $media->mediaId;
-			$media_url = (string) $media->mediaUrl;
-			$referenced = $wpdb->get_var( $wpdb->prepare(
-				"SELECT 1 FROM $table_name_refs
-				WHERE run_id = %d AND originType NOT LIKE 'HASH:%%'
-				AND ((%d > 0 AND mediaId = %d) OR (mediaUrl_hash = %s AND mediaUrl = %s))
-				LIMIT 1",
-				$run_id,
-				$media_id,
-				$media_id,
-				hash( 'sha256', $media_url ),
-				$media_url
-			) );
-			if ( $referenced ) {
+			$path = (string) $media->mediaUrl;
+			if ( isset( $used_ids[ (int) $media->mediaId ] ) || isset( $used_urls[ $path ] ) ) {
 				continue;
 			}
-			$this->core->add_issue( $media_url, 'DUPLICATE' );
+			if ( isset( $stored[ $this->core->clean_uploaded_filename( $path ) ] ) ) {
+				continue;
+			}
+			if ( $may_yield && $added > 0 && $this->core->timeout_should_yield() ) {
+				return false;
+			}
+			$this->core->add_issue( $path, 'DUPLICATE' );
+			$added++;
 		}
 
 		return true;
+	}
 
+	// A failed lookup must not read as "nothing references these copies": that would list used
+	// files as duplicates to delete.
+	private function get_col_or_fail( $query ) {
+		global $wpdb;
+		$col = $wpdb->get_col( $query );
+		if ( $wpdb->last_error ) {
+			throw new RuntimeException( sprintf( __( 'Media Cleaner could not check the duplicates: %s', 'media-cleaner' ), $wpdb->last_error ) );
+		}
+		return $col;
 	}
 
 	function check_media( $media ) {

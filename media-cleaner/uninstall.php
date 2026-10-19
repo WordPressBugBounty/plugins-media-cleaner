@@ -40,6 +40,8 @@ if ( $clean_uninstall ) {
 	}
 
 	delete_transient( 'wpmc_progress' );
+	delete_transient( 'wpmc_cached_urls' );
+	delete_transient( 'wpmc_cached_ids' );
 
     // Remove all wpmc options
 	$option_pattern = $wpdb->esc_like( 'wpmc_' ) . '%';

@@ -248,9 +248,9 @@ class Meow_WPMC_Support {
       array_push( $unsupported, 'Spectra' );
 		}
 
-    // Foo Gallery
+    // FooGallery
 		if ( defined( 'FOOGALLERY_VERSION' ) ) {
-			array_push( $unsupported, 'Foo Gallery' );
+			array_push( $unsupported, 'FooGallery' );
 		}
 
     // Tutor LMS
