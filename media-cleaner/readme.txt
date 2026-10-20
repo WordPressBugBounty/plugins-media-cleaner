@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.3.2
+Stable tag: 7.3.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -21,7 +21,7 @@ Media Cleaner is like a ninja assassin for your Media Library - it'll stealthily
 
 To learn more about compatibility, features, and the Pro version, check out the [tutorial](https://meowapps.com/media-cleaner/tutorial/) on the [official website](https://meowapps.com/media-cleaner/).
 
-[youtube https://www.youtube.com/watch?v=qmDSgWZWnSw]
+[youtube https://www.youtube.com/watch?v=ZbGG7V2t4X0]
 
 === AI ASSISTANTS (MCP) ===
 
@@ -52,6 +52,11 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.3.3 (2026/10/20) =
+* Fix: Images set in the Customizer are now detected in every theme's settings, so they are no longer flagged as unused.
+* Fix: Scans now run on SQLite installs such as WordPress Playground and Studio, and recovering a file no longer relies on MySQL-only SQL.
+* Fix: Closing a dropdown no longer drops the dashboard's colors.
 
 = 7.3.2 (2026/10/19) =
 * Update: Scans now run many times faster by processing several batches per request.

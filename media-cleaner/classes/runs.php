@@ -986,11 +986,21 @@ class Meow_WPMC_Runs {
 		global $wpdb;
 		$active_id = $this->get_active_id();
 		$scan_table = $wpdb->prefix . 'mclean_scan';
+		// Rows from before path_hash existed get it here, in PHP, rather than through SHA2() and
+		// `<=>` in the copy: SQLite (Playground, Studio) has neither, so every scan failed there.
+		$unhashed = $wpdb->get_results( $wpdb->prepare(
+			"SELECT id, path FROM $scan_table
+			WHERE run_id = %d AND (ignored = 1 OR deleted = 1) AND path_hash IS NULL AND path IS NOT NULL",
+			(int) $active_id
+		) );
+		foreach ( $unhashed as $row ) {
+			$wpdb->update( $scan_table, array( 'path_hash' => hash( 'sha256', $row->path ) ), array( 'id' => (int) $row->id ), array( '%s' ), array( '%d' ) );
+		}
 		$result = $wpdb->query( $wpdb->prepare(
 			"INSERT INTO $scan_table
 			(run_id, time, type, postId, path, path_hash, manifest, size, ignored, deleted, issue, parentId)
 			SELECT %d, source.time, source.type, source.postId, source.path,
-				COALESCE(source.path_hash, SHA2(source.path, 256)), source.manifest, source.size,
+				source.path_hash, source.manifest, source.size,
 				source.ignored, source.deleted, source.issue, NULL
 			FROM $scan_table AS source
 			WHERE source.run_id = %d AND (source.ignored = 1 OR source.deleted = 1)
@@ -998,8 +1008,8 @@ class Meow_WPMC_Runs {
 				SELECT 1 FROM $scan_table AS target
 				WHERE target.run_id = %d
 				AND target.type = source.type
-				AND target.postId <=> source.postId
-				AND target.path_hash <=> COALESCE(source.path_hash, SHA2(source.path, 256))
+				AND ( target.postId = source.postId OR ( target.postId IS NULL AND source.postId IS NULL ) )
+				AND ( target.path_hash = source.path_hash OR ( target.path_hash IS NULL AND source.path_hash IS NULL ) )
 				AND target.issue = source.issue
 				AND target.ignored = source.ignored
 				AND target.deleted = source.deleted

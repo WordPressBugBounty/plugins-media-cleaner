@@ -1278,10 +1278,6 @@ class Meow_WPMC_Core {
 		if ( $this->is_url( $cl ) ) {
 			$urls = array_merge( $this->get_urls_from_html( $cl ), $urls );
 		}
-		$custom_logo = get_theme_mod( 'custom_logo' );
-		if ( !empty( $custom_logo ) && is_numeric( $custom_logo ) ) {
-			array_push( $ids, (int)$custom_logo );
-		}
 		$si = get_site_icon_url();
 		if ( $this->is_url( $si ) ) {
 			array_push( $urls, $this->clean_url( $si ) );
@@ -1294,14 +1290,7 @@ class Meow_WPMC_Core {
 		if ( $this->is_url( $cd ) ) {
 			array_push( $urls, $this->clean_url( $cd ) );
 		}
-		$photography_hero_image = get_theme_mod( 'photography_hero_image' );
-		if ( !empty( $photography_hero_image ) ) {
-			array_push( $ids, $photography_hero_image );
-		}
-		$author_profile_picture = get_theme_mod( 'author_profile_picture' );
-		if ( !empty( $author_profile_picture ) ) {
-			array_push( $ids, $author_profile_picture );
-		}
+		$this->get_images_from_theme_mods( $ids, $urls );
 		if ( function_exists ( 'get_uploaded_header_images' ) ) {
 			$header_images = get_uploaded_header_images();
 			if ( !empty( $header_images ) ) {
@@ -1311,6 +1300,40 @@ class Meow_WPMC_Core {
 					}
 				}
 			}
+		}
+	}
+
+	// Any Customizer setting can hold an image (Image controls store a URL, Media controls an ID),
+	// and themes name them freely, so a list of known keys missed most of them and flagged images
+	// shown on live pages as unused. Every theme's mods are read, not only the active
+	// one's, so switching back to a theme never finds its images deleted.
+	private function get_images_from_theme_mods( &$ids, &$urls ) {
+		global $wpdb;
+		$names = $wpdb->get_col( "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE 'theme\\_mods\\_%' LIMIT 500" );
+		foreach ( $names as $name ) {
+			$this->collect_theme_mod_images( get_option( $name ), '', $ids, $urls );
+		}
+	}
+
+	private function collect_theme_mod_images( $value, $key, &$ids, &$urls, $depth = 0 ) {
+		if ( $depth > 16 ) return;
+		if ( is_array( $value ) || is_object( $value ) ) {
+			foreach ( (array) $value as $k => $v ) {
+				$this->collect_theme_mod_images( $v, is_string( $k ) ? $k : $key, $ids, $urls, $depth + 1 );
+			}
+		}
+		else if ( is_numeric( $value ) ) {
+			// Numbers are also column counts or sizes, so only those under an image-like key are IDs.
+			if ( (int) $value > 0 && preg_match( '/image|img|logo|icon|background|bg|photo|picture|banner|media|thumb|avatar|header|hero|cover|attachment/i', $key ) ) {
+				array_push( $ids, (int) $value );
+			}
+		}
+		else if ( $this->is_url( $value ) ) {
+			$url = $this->clean_url( $value );
+			if ( !empty( $url ) ) array_push( $urls, $url );
+		}
+		else if ( is_string( $value ) && strpos( $value, '<' ) !== false ) {
+			$urls = array_merge( $urls, $this->get_urls_from_html( $value ) );
 		}
 	}
 
@@ -1940,10 +1963,13 @@ class Meow_WPMC_Core {
 			(int) $id
 		) );
 		if ( !$live || $live->path_hash === null ) return;
+		// Not `<=>`: SQLite (Playground, Studio) has no null-safe equal, and a NULL bound
+		// through %s became '' anyway, which never matched a NULL postId.
+		$post_sql = $live->postId === null ? 'postId IS NULL' : $wpdb->prepare( 'postId = %d', (int) $live->postId );
 		$wpdb->query( $wpdb->prepare(
 			"DELETE FROM $table_name
-			WHERE path_hash = %s AND deleted = 1 AND run_id != %d AND type = %d AND postId <=> %s AND path = %s",
-			$live->path_hash, (int) $live->run_id, (int) $live->type, $live->postId, $live->path
+			WHERE path_hash = %s AND deleted = 1 AND run_id != %d AND type = %d AND $post_sql AND path = %s",
+			$live->path_hash, (int) $live->run_id, (int) $live->type, $live->path
 		) );
 	}
 
