@@ -651,7 +651,7 @@ class Meow_WPMC_Rest
 		$schema_ok = $this->core->runs && $this->core->runs->maybe_upgrade();
 		$add_check( 'database', $schema_ok ? 'ready' : 'blocked', $schema_ok ? __( 'Database tables are ready.', 'media-cleaner' ) : __( 'Database tables could not be created or upgraded.', 'media-cleaner' ) );
 		if ( $schema_ok ) {
-			$gc_ok = $this->core->runs->garbage_collect( 500 );
+			$gc_ok = $this->core->runs->garbage_collect();
 			$add_check( 'database_retention', $gc_ok ? 'ready' : 'constrained', $gc_ok ? __( 'Old scan data is within the bounded retention process.', 'media-cleaner' ) : __( 'Old scan data could not be pruned during this request.', 'media-cleaner' ) );
 			$resumable = $this->core->runs->get_resumable();
 			$add_check( 'scan_lock', $resumable ? 'blocked' : 'ready', $resumable ? __( 'A staged scan already exists. Resume or stop it before starting another scan.', 'media-cleaner' ) : __( 'No competing scan is running.', 'media-cleaner' ), $resumable ? array( 'run_id' => (int) $resumable->id ) : array() );

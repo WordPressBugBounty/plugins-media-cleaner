@@ -697,18 +697,23 @@ class Meow_WPMC_Runs {
 		);
 	}
 
-	public function garbage_collect( $limit = 500 ) {
+	/**
+	 * Keeps the active run and the three newest finished ones, and removes the data of
+	 * every older run, oldest first, within a time budget.
+	 *
+	 * Every scan creates a run, and a run holds a full copy of the references and results.
+	 * This used to prune a single batch of a single run per scan, then that run slid out
+	 * of reach, so the tables grew with every scan. It has to catch up with all of them.
+	 */
+	public function garbage_collect( $budget = 5 ) {
 		global $wpdb;
-		$active_id = $this->get_active_id();
-		$candidates = $wpdb->get_col( $wpdb->prepare(
+		$finished = array_map( 'intval', $wpdb->get_col( $wpdb->prepare(
 			"SELECT id FROM {$this->table( 'runs' )}
 			WHERE status IN ('completed', 'failed', 'cancelled') AND id != %d
-			ORDER BY id DESC LIMIT 20",
-			$active_id
-		) );
-		if ( count( $candidates ) <= 3 ) return true;
-		$run_id = (int) $candidates[3];
-		$limit = max( 10, min( 2000, (int) $limit ) );
+			ORDER BY id DESC",
+			$this->get_active_id()
+		) ) );
+		$stale = array_reverse( array_slice( $finished, 3 ) );
 		$tables = array(
 			$this->table( 'scan' ),
 			$this->table( 'refs' ),
@@ -716,13 +721,18 @@ class Meow_WPMC_Runs {
 			$this->table( 'work' ),
 			$this->table( 'operations' ),
 		);
-		foreach ( $tables as $table ) {
-			$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM `$table` WHERE run_id = %d LIMIT %d", $run_id, $limit ) );
-			if ( $deleted === false ) return false;
-			$remaining = (int) $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM `$table` WHERE run_id = %d LIMIT 1", $run_id ) );
-			if ( $remaining ) return true;
+		$deadline = microtime( true ) + $budget;
+		foreach ( $stale as $run_id ) {
+			foreach ( $tables as $table ) {
+				do {
+					if ( microtime( true ) > $deadline ) return true;
+					$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM `$table` WHERE run_id = %d LIMIT 2000", $run_id ) );
+					if ( $deleted === false ) return false;
+				} while ( $deleted > 0 );
+			}
+			if ( $wpdb->delete( $this->table( 'runs' ), array( 'id' => $run_id ), array( '%d' ) ) === false ) return false;
 		}
-		return $wpdb->delete( $this->table( 'runs' ), array( 'id' => $run_id ), array( '%d' ) ) !== false;
+		return true;
 	}
 
 	public function begin_operation( $issue_id, $operation, $request_key ) {

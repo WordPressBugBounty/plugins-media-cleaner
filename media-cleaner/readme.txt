@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.3.3
+Stable tag: 7.3.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,6 +52,14 @@ This plugin is compatible with all media types, including retina and WebP versio
 1. Media -> Media Cleaner
 
 == Changelog ==
+
+= 7.3.4 (2026/10/24) =
+* Add: Divi 4 parser now detects testimonial portrait images.
+* Update: The scan's Finished dialog names the page builders only Pro can read, and clicking a locked scan method explains what Pro would do.
+* Update: The Ignore button is now disabled instead of hidden when cleanup is not allowed.
+* Update: Pro badges now link to the Media Cleaner page, and a Pro install that is not activated yet is shown as Pro.
+* Update: Clearer License tab that explains Pro to free users and invites Pro buyers to activate.
+* Fix: Old scans are now fully cleaned up, so the database tables no longer grow with every scan.
 
 = 7.3.3 (2026/10/20) =
 * Fix: Images set in the Customizer are now detected in every theme's settings, so they are no longer flagged as unused.
