@@ -75,6 +75,16 @@ class Meow_WPMC_Rest
 				'permission_callback' => array( $this->core, 'can_access_features' ),
 				'callback' => array( $this, 'rest_all_ids' ),
 			) );
+			register_rest_route( $this->namespace, '/storage', array(
+				'methods' => 'GET',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_storage' ),
+			) );
+			register_rest_route( $this->namespace, '/uploads_estimate', array(
+				'methods' => 'GET',
+				'permission_callback' => array( $this->core, 'can_access_features' ),
+				'callback' => array( $this, 'rest_uploads_estimate' ),
+			) );
 			register_rest_route( $this->namespace, '/stats', array(
 				'methods' => 'GET',
 				'permission_callback' => array( $this->core, 'can_access_features' ),
@@ -2696,6 +2706,22 @@ class Meow_WPMC_Rest
 		) );
 	}
 
+	function rest_storage( $request ) {
+		if ( !class_exists( 'MeowPro_WPMC_Storage' ) ) {
+			return new WP_REST_Response( array( 'success' => false, 'message' => __( 'Storage is a Pro feature.', 'media-cleaner' ) ), 403 );
+		}
+		$storage = new MeowPro_WPMC_Storage( $this->core );
+		$refresh = rest_sanitize_boolean( $request->get_param( 'refresh' ) );
+		$stats = $request->get_param( 'part' ) === 'folders' ? $storage->folders( $refresh ) : $storage->get( $refresh );
+		return new WP_REST_Response( array( 'success' => true, 'data' => $stats ), 200 );
+	}
+
+	// Pro scans the uploads folder itself, so it never needs the estimate.
+	function rest_uploads_estimate() {
+		$estimate = class_exists( 'MeowPro_WPMC_Core' ) ? null : ( new Meow_WPMC_Uploads_Estimate( $this->core ) )->get();
+		return new WP_REST_Response( array( 'success' => true, 'data' => $estimate ), 200 );
+	}
+
 	function rest_get_stats( $request ) {
 		$search = sanitize_text_field( $request->get_param('search') );
 		$reference_filter = sanitize_text_field( $request->get_param('referenceFilter') );
@@ -2714,8 +2740,13 @@ class Meow_WPMC_Rest
 		$trash = $wpdb->get_row( $wpdb->prepare( "SELECT COUNT(*) as entries, SUM(size) as size
 			FROM $table_scan WHERE run_id = %d AND deleted = 1 $whereSql", $run_id ) );
 		$references = $this->count_references($search, $reference_filter);
+		// The entries a Clean Library scan looks at, so the dashboard can tell what share of them it
+		// lists. Only meaningful for the whole list, not a search or the repair view.
+		$library = ( $repair_mode || !empty( $search ) ) ? null
+			: (int) $this->engine->count_media_entries( $this->core->get_option( 'attach_is_use' ) );
 
 		return new WP_REST_Response( [ 'success' => true, 'data' => array(
+			'library' => $library,
 			'issues' => $issues->entries,
 			'issues_size' => $issues->size,
 			'ignored' => $ignored,

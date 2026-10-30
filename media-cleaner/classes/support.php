@@ -298,6 +298,11 @@ class Meow_WPMC_Support {
 			array_push( $unsupported, 'Soliloquy' );
 		}
 
+    // Eventin
+    if ( defined( 'ETN_VERSION' ) || defined( 'EVENTIN_VERSION' ) ) {
+      array_push( $unsupported, 'Eventin' );
+    }
+
     return $unsupported;
   }
 }

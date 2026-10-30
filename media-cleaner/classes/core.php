@@ -27,6 +27,9 @@ class Meow_WPMC_Core {
 	// A file that exists but cannot be safely fingerprinted
 	const FINGERPRINT_UNSAFE = '@unsafe';
 
+	// A file left in place when its item was trashed, because another attachment uses it
+	const FINGERPRINT_SHARED = '@shared';
+
 	// What makes a private directory private, and the only files in the trash that
 	// are not trash. Written when the directory is created, skipped when it is read.
 	const PRIVATE_GUARDS = array(
@@ -105,6 +108,7 @@ class Meow_WPMC_Core {
 
 		// Admin
 		$this->admin = new Meow_WPMC_Admin( $this );
+		new Meow_WPMC_Status( $this );
 
 		// Advanced core
 		if ( class_exists( 'MeowPro_WPMC_Core' ) ) {
@@ -112,7 +116,7 @@ class Meow_WPMC_Core {
 		}
 
 		// Only initialize variables if we are on a relevant screen
-		$pages  = [ 'wpmc_dashboard', 'wpmc_settings' ];
+		$pages  = [ 'wpmc_dashboard', 'wpmc_settings', 'wpmc_storage' ];
 		$page = isset( $_GET["page"] ) ? sanitize_text_field( $_GET["page"] ) : '';
 		$is_wpmc_screen = in_array( $page, $pages );
 		
@@ -453,6 +457,15 @@ class Meow_WPMC_Core {
 	// from any server or proxy limit, long enough that the request overhead stops dominating.
 	public function batch_time_target() {
 		return min( 5, $this->get_request_time_budget() / 4 );
+	}
+
+	// Folders of the uploads directory that belong to other plugins (caches, logs, exports) rather
+	// than to the Media Library. The uploads scan and the free estimate of it skip the same ones.
+	public function get_excluded_upload_dirs() {
+		return apply_filters( 'wpmc_excluded_dirs', array( '.', '..', 'wpmc-trash', '.htaccess', 'index.html', 'GeoIP.dat', 'GeoIPv6.dat',
+			'ptetmp', 'profiles', 'sites', 'bws_captcha_images', 'wp-personal-data-exports',
+			'wp-security-audit-log', 'maxmegamenu', 'woocommerce_uploads', 'wc-logs', 'bb-plugin', 'wpallimport', 'wpallexport', 'yith-gift-cards', 'siteground-optimizer-assets', 'elementor',
+			'pb_backupbuddy', 'reports', 'utubevideo-cache', 'gravity_forms', 'ithemes-security' ) );
 	}
 
 	public function get_request_time_budget() {
@@ -2014,6 +2027,10 @@ class Meow_WPMC_Core {
 			$recovered_paths = array();
 			foreach ( $paths as $path ) {
 				if ( array_key_exists( $path, $file_manifest ) && $file_manifest[ $path ] === null ) continue;
+				// Never moved by this item. If another item has since put it in quarantine,
+				// bringing it back is still right: this attachment needs it too.
+				if ( isset( $file_manifest[ $path ] ) && $file_manifest[ $path ] === self::FINGERPRINT_SHARED
+					&& !$this->quarantine_holds( array( $path ) ) ) continue;
 				$did_move = false;
 				$result = $this->recover_file( $path, $did_move );
 				if ( is_wp_error( $result ) ) {
@@ -2403,7 +2420,7 @@ class Meow_WPMC_Core {
 					}
 				}
 				$deleted_attachment = $this->timed( 'wp_delete_attachment', function () use ( $issue ) {
-					return get_post( $issue->postId ) ? wp_delete_attachment( $issue->postId, true ) : true;
+					return get_post( $issue->postId ) ? $this->delete_attachment_keeping_shared( $issue->postId ) : true;
 				}, true );
 				if ( !$deleted_attachment ) {
 					return new WP_Error( 'wpmc_attachment_delete_failed', __( 'WordPress could not permanently delete the attachment.', 'media-cleaner' ) );
@@ -2415,13 +2432,38 @@ class Meow_WPMC_Core {
 			$paths = $this->timed( 'get_paths_from_attachment', function () use ( $issue ) {
 				return $this->get_paths_from_attachment( $issue->postId );
 			} );
+			$shared = $this->timed( 'shared_attachment_paths', function () use ( $issue, $paths ) {
+				return $this->shared_attachment_paths( $issue->postId, $paths );
+			} );
 			$file_manifest = json_decode( (string) $issue->manifest, true );
 			$file_manifest = is_array( $file_manifest ) ? $file_manifest : array();
+			// Recorded so recover() knows these were never moved, and the trash cleanup
+			// does not treat them as missing from quarantine.
+			$manifest_changed = false;
+			if ( !empty( $shared ) ) {
+				$this->log( sprintf( '🛡️ Media #%d: kept %d file(s) in place, used by Media #%s too.',
+					$issue->postId, count( $shared ), implode( ', #', array_unique( $shared ) ) ) );
+			}
+			foreach ( $shared as $path => $user_id ) {
+				if ( !isset( $file_manifest[ $path ] ) || $file_manifest[ $path ] !== self::FINGERPRINT_SHARED ) {
+					$file_manifest[ $path ] = self::FINGERPRINT_SHARED;
+					$manifest_changed = true;
+				}
+			}
+			// Kept in place last time (trashed, then recovered), but nothing else uses it now.
+			foreach ( $paths as $path ) {
+				if ( isset( $shared[ $path ] ) || !isset( $file_manifest[ $path ] ) || $file_manifest[ $path ] !== self::FINGERPRINT_SHARED ) continue;
+				$fingerprint = $this->build_file_manifest( array( $path ) );
+				if ( is_wp_error( $fingerprint ) ) return $fingerprint;
+				$file_manifest = $fingerprint + $file_manifest;
+				$manifest_changed = true;
+			}
 			$trashed_paths = array();
 			$trash_error = $this->timed( sprintf( 'trash_files (%d)', count( $paths ) ),
-				function () use ( $paths, $file_manifest, &$trashed_paths ) {
+				function () use ( $paths, $file_manifest, $shared, &$trashed_paths ) {
 					foreach ( $paths as $path ) {
 						if ( array_key_exists( $path, $file_manifest ) && $file_manifest[ $path ] === null ) continue;
+						if ( isset( $shared[ $path ] ) ) continue;
 						$did_move = false;
 						$result = $this->trash_file( $path, $did_move );
 						if ( $did_move ) $trashed_paths[] = $path;
@@ -2445,7 +2487,9 @@ class Meow_WPMC_Core {
 				}
 				return is_wp_error( $post_result ) ? $post_result : new WP_Error( 'wpmc_attachment_trash_failed', __( 'The attachment record could not be moved to Media Cleaner trash.', 'media-cleaner' ) );
 			}
-			$updated = $wpdb->query( $wpdb->prepare( "UPDATE $table_name SET deleted = 1, ignored = 0, time = NOW() WHERE id = %d", $id ) );
+			$updated = $manifest_changed
+				? $wpdb->query( $wpdb->prepare( "UPDATE $table_name SET deleted = 1, ignored = 0, time = NOW(), manifest = %s WHERE id = %d", wp_json_encode( $file_manifest ), $id ) )
+				: $wpdb->query( $wpdb->prepare( "UPDATE $table_name SET deleted = 1, ignored = 0, time = NOW() WHERE id = %d", $id ) );
 			if ( $updated === false ) {
 				if ( $previous_post_type && $previous_post_type !== 'wmpc-trash' ) {
 					wp_update_post( array( 'ID' => $issue->postId, 'post_type' => $previous_post_type ) );
@@ -2628,11 +2672,15 @@ class Meow_WPMC_Core {
 		$doomed = array();
 		foreach ( $rows as $issue ) {
 			$cursor = (int) $issue->id;
-			if ( $recoverable_possible ) {
-				$relatives = $this->trash_relatives( $issue );
+			// Files kept in place for another attachment were never quarantined by this
+			// item: it is recovered without them, and a trash copy of one is another item's.
+			$kept = $this->kept_in_place( $issue );
+			if ( $recoverable_possible || !empty( $kept ) ) {
+				$relatives = array_values( array_diff( $this->trash_relatives( $issue ), $kept ) );
+				$holds = empty( $relatives ) ? !empty( $kept ) : ( $recoverable_possible && $this->quarantine_holds( $relatives ) );
 				// Healthy trash: its files are still in quarantine and still verify. That
 				// is the only kind that can be given back, and it is left untouched.
-				if ( $this->quarantine_holds( $relatives ) && !is_wp_error( $this->validate_issue_manifest( $issue, 'recover' ) ) ) continue;
+				if ( $holds && !is_wp_error( $this->validate_issue_manifest( $issue, 'recover' ) ) ) continue;
 				// Best effort: drop whatever is still physically in quarantine. Directories
 				// and symlinks are never removed, and a missing or unsafe path is skipped
 				// rather than fatal — the point is to unstick the record.
@@ -2679,6 +2727,12 @@ class Meow_WPMC_Core {
 			return array( preg_replace( '/\s\(\+.*$/', '', (string) $issue->path ) );
 		}
 		return $this->get_paths_from_attachment( (int) $issue->postId );
+	}
+
+	// The files this item left in place when it was trashed, because another attachment uses them.
+	private function kept_in_place( $issue ) {
+		$manifest = json_decode( (string) $issue->manifest, true );
+		return is_array( $manifest ) ? array_keys( $manifest, self::FINGERPRINT_SHARED, true ) : array();
 	}
 
 	// Whether the quarantine holds anything at all. This is the one question worth
@@ -2965,6 +3019,9 @@ class Meow_WPMC_Core {
 		if ( is_string( $origin ) && strlen( $origin ) > 8192 ) {
 			$origin = substr( $origin, 0, 8192 );
 		}
+		// Labels only, so clean them: the trims above can split a multibyte character.
+		$type = $this->storable_reference_text( 'originType', $type );
+		$origin = $this->storable_reference_text( 'origin', $origin );
 		if ( !empty( $id ) ) {
 			$this->queue_reference( array( 'id' => $id, 'url' => null, 'type' => $type, 'origin' => $origin ) );
 		}
@@ -2981,8 +3038,25 @@ class Meow_WPMC_Core {
 			if ( substr( $url, 0, 5 ) === "http:" || substr( $url, 0, 6 ) === "https:" || substr( $url, 0, 11 ) === "javascript:" ) {
 				return;
 			}
+			// Content can decode to bytes the refs table cannot hold (a latin1 %E9 becomes invalid
+			// UTF-8, an emoji does not fit a utf8mb3 table). wpdb then refuses the whole batch and
+			// the scan dies. No file WordPress tracks can have such a name, since it could not have
+			// been stored either, so the reference can never match: skip it.
+			if ( $this->storable_reference_text( 'mediaUrl', $url ) !== $url ) {
+				$this->log( "⚠️ Skipped a reference the database cannot store: " . rawurlencode( $url ) );
+				return;
+			}
 			$this->queue_reference( array( 'id' => null, 'url' => $url, 'type' => $type, 'origin' => $origin ) );
 		}
+	}
+
+	private function storable_reference_text( $column, $value ) {
+		if ( !is_string( $value ) || !preg_match( '/[^\x00-\x7F]/', $value ) ) {
+			return $value;
+		}
+		global $wpdb;
+		$clean = $wpdb->strip_invalid_text_for_column( $wpdb->prefix . 'mclean_refs', $column, $value );
+		return is_wp_error( $clean ) ? $value : $clean;
 	}
 
 	private function queue_reference( $reference ) {
@@ -3694,6 +3768,9 @@ class Meow_WPMC_Core {
 		$manifest = json_decode( (string) $issue->manifest, true );
 		if ( !is_array( $manifest ) ) return true;
 		foreach ( $manifest as $relative => $expected ) {
+			// Left in place for another attachment, so never this item's to verify: it may
+			// have changed or gone away since without that saying anything about the item.
+			if ( $expected === self::FINGERPRINT_SHARED ) continue;
 			// We throw an error for the unasfe tag only in the context of cleanup, not in the context of scanning.
 			if ( $expected === self::FINGERPRINT_UNSAFE ) {
 				return new WP_Error( 'wpmc_file_unsafe_for_cleanup', __( 'This item includes a file that cannot be safely verified (a symbolic link, an unreadable file, or a special file), so Media Cleaner will not touch it. Fix or remove that file, then run a new scan.', 'media-cleaner' ) );
@@ -3849,6 +3926,97 @@ class Meow_WPMC_Core {
 			}
 		}
 		return $paths;
+	}
+
+	// The files of an attachment that another attachment points to as well, as path => the ID of
+	// that attachment. Imports (WooCommerce CSV, migrations) can create hundreds of records on one
+	// physical file, and cleaning an unused one must not take the file from the one in use. Our
+	// own trashed attachments only count with $include_trashed: they do not need the file in
+	// place, but they need it to still exist if they are recovered.
+	//
+	// Only _wp_attached_file is queried, like core's attachment_url_to_postid(); the metadata blobs
+	// are never searched. They are read only for the few neighbours whose file name says their
+	// sizes or original could be one of these files (photo-scaled.jpg keeps photo.jpg as original).
+	private function shared_attachment_paths( $post_id, $paths, $include_trashed = false ) {
+		global $wpdb;
+		$paths = array_values( array_unique( array_filter( (array) $paths ) ) );
+		if ( empty( $paths ) ) return array();
+		$main = $paths[0];
+		$trashed_sql = $include_trashed ? '' : "AND posts.post_type <> 'wmpc-trash'";
+		$base_sql = "SELECT meta.post_id, meta.meta_value FROM $wpdb->postmeta AS meta
+			INNER JOIN $wpdb->posts AS posts ON posts.ID = meta.post_id
+			WHERE meta.meta_key = '_wp_attached_file' AND meta.post_id <> %d $trashed_sql";
+		$placeholders = implode( ',', array_fill( 0, count( $paths ), '%s' ) );
+		$rows = $wpdb->get_results( $wpdb->prepare(
+			"$base_sql AND meta.meta_value IN ($placeholders) LIMIT 1000",
+			array_merge( array( (int) $post_id ), $paths )
+		) );
+		$shared = array();
+		$neighbours = array();
+		foreach ( (array) $rows as $row ) {
+			if ( $row->meta_value === $main ) {
+				// Sizes are generated next to the main file under its name, so an attachment on
+				// the same main file has every one of these files too.
+				return array_fill_keys( $paths, (int) $row->post_id );
+			}
+			if ( in_array( $row->meta_value, $paths, true ) ) $shared[ $row->meta_value ] = (int) $row->post_id;
+			// Only equal for the database collation (case, accents): its own files decide.
+			else $neighbours[] = (int) $row->post_id;
+		}
+		$directory = dirname( $main );
+		$stem = null;
+		foreach ( $paths as $path ) {
+			if ( dirname( $path ) !== $directory ) continue;
+			$name = pathinfo( $path, PATHINFO_FILENAME );
+			if ( $stem === null || strlen( $name ) < strlen( $stem ) ) $stem = $name;
+		}
+		$prefix = ( $directory === '.' ? '' : $directory . '/' ) . $stem . '-';
+		$neighbours = array_unique( array_merge( $neighbours, array_map( 'intval', $wpdb->get_col( $wpdb->prepare(
+			"$base_sql AND meta.meta_value LIKE %s LIMIT 50",
+			(int) $post_id, $wpdb->esc_like( $prefix ) . '%'
+		) ) ) ) );
+		if ( !empty( $neighbours ) ) {
+			update_meta_cache( 'post', $neighbours );
+			foreach ( $neighbours as $neighbour ) {
+				foreach ( array_intersect( $this->get_paths_from_attachment( $neighbour ), $paths ) as $path ) {
+					if ( !isset( $shared[ $path ] ) ) $shared[ $path ] = $neighbour;
+				}
+			}
+		}
+		return $shared;
+	}
+
+	// wp_delete_attachment() removes every file the attachment lists. Core only spares a legacy
+	// 'thumb' that another attachment shares, so the main file, its sizes and its original would
+	// go even while another record still points to them.
+	private function delete_attachment_keeping_shared( $post_id ) {
+		$paths = $this->get_paths_from_attachment( $post_id );
+		$shared = $this->shared_attachment_paths( $post_id, $paths, true );
+		if ( empty( $shared ) ) return wp_delete_attachment( $post_id, true );
+		// A shared main file shares everything WordPress made from it (backups and companions
+		// included), and all of that lives in its directory.
+		$main_user = isset( $shared[ $paths[0] ] ) ? $shared[ $paths[0] ] : null;
+		$directory = dirname( $paths[0] );
+		$kept = array();
+		$keep = function ( $file ) use ( $shared, $main_user, $directory, &$kept ) {
+			$relative = is_string( $file ) ? $this->clean_uploaded_filename( $file ) : '';
+			if ( $relative === '' ) return $file;
+			$user_id = isset( $shared[ $relative ] ) ? $shared[ $relative ] : ( dirname( $relative ) === $directory ? $main_user : null );
+			if ( !$user_id ) return $file;
+			$kept[ $relative ] = $user_id;
+			return '';
+		};
+		add_filter( 'wp_delete_file', $keep, PHP_INT_MAX );
+		try {
+			return wp_delete_attachment( $post_id, true );
+		}
+		finally {
+			remove_filter( 'wp_delete_file', $keep, PHP_INT_MAX );
+			if ( !empty( $kept ) ) {
+				$this->log( sprintf( '🛡️ Media #%d: kept %d file(s) on disk, used by Media #%s too.',
+					$post_id, count( $kept ), implode( ', #', array_unique( $kept ) ) ) );
+			}
+		}
 	}
 
 	function is_media_ignored( $attachmentId ) {

@@ -18,10 +18,22 @@ class Meow_WPMC_UI {
     }
 		add_media_page( 'Media Cleaner Dashboard', __( 'Cleaner', 'media-cleaner' ), 'read', 
 			'wpmc_dashboard', array( $this, 'cleaner_dashboard' ), 1 );
+		// Storage is reached from the Media Cleaner header, so it gets a page but no menu entry.
+		$hook = add_media_page( 'Media Cleaner Storage', __( 'Storage', 'media-cleaner' ), 'read',
+			'wpmc_storage', array( $this, 'cleaner_storage' ) );
+		remove_submenu_page( 'upload.php', 'wpmc_storage' );
+		// Without its menu entry, WordPress finds no title for the page and the browser tab stays blank.
+		add_action( 'load-' . $hook, function () {
+			$GLOBALS['title'] = 'Media Cleaner Storage';
+		} );
 	}
 
 	public function cleaner_dashboard() {
 		echo '<div id="wpmc-dashboard"></div>';
+	}
+
+	public function cleaner_storage() {
+		echo '<div id="wpmc-storage"></div>';
 	}
 
 	/*******************************************************************************

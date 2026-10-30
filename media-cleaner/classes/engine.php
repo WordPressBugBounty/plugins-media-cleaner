@@ -329,6 +329,9 @@ SQL;
 		if ( !is_array( $force_issue_sizes ) ) {
 			$force_issue_sizes = [];
 		}
+		// A size no longer registered can still be asked for by name, and WordPress then serves its
+		// stored thumbnail: those are references too, or a shop or theme would lose its images.
+		$requested_sizes = (array) apply_filters( 'wpmc_requested_image_sizes', array() );
 
 		foreach ( $medias as $media_id ) {
 			if ( $this->core->timeout_should_yield() ) {
@@ -345,9 +348,12 @@ SQL;
 				}
 
 				// Get the current registered image sizes
-				$needed_sizes = wp_get_registered_image_subsizes();
-			
-				foreach ( array_keys( $needed_sizes ) as $size ) {
+				$needed_sizes = array_keys( wp_get_registered_image_subsizes() );
+				foreach ( $requested_sizes as $requested ) {
+					if ( isset( $meta['sizes'][ $requested ] ) && !in_array( $requested, $needed_sizes, true ) ) $needed_sizes[] = $requested;
+				}
+
+				foreach ( $needed_sizes as $size ) {
 					$image_path = path_join( dirname( $file ), $meta['sizes'][ $size ]['file'] ?? '' );
 					$file_exists = isset( $meta['sizes'][ $size ] ) && file_exists( $image_path ) && filesize( $image_path ) > 0;
 					if ( !$file_exists ) {
@@ -367,6 +373,15 @@ SQL;
 							"{OG_THUMB}" . $size,
 							$media_id, ['force_cache' => true ]
 						);
+					}
+				}
+
+				// The upload WordPress keeps next to a "-scaled" copy is never shown on pages, but it
+				// is the copy thumbnails are regenerated from, so it only goes when it was chosen.
+				if ( in_array( 'original_image', $force_issue_sizes, true ) && !empty( $meta['original_image'] ) ) {
+					$original_path = path_join( dirname( $file ), $meta['original_image'] );
+					if ( file_exists( $original_path ) ) {
+						$this->core->add_issue( $this->core->clean_uploaded_filename( $original_path ), 'FORCED_THUMBNAIL_ISSUE', $media_id );
 					}
 				}
 			}
