@@ -517,7 +517,7 @@ class Meow_WPMC_Rest
 		}
 		$private_storage = $this->core->prepare_private_storage();
 		if ( is_wp_error( $private_storage ) ) {
-			$private_storage->add_data( array( 'status' => 412 ) );
+			$private_storage->add_data( array_merge( (array) $private_storage->get_error_data(), array( 'status' => 412 ) ) );
 			return $this->error_response( $private_storage );
 		}
 		$roundtrip = $this->core->test_quarantine_roundtrip();
@@ -1365,7 +1365,7 @@ class Meow_WPMC_Rest
 		}
 		else if ( $method === 'duplicates' ) {
 			$data = array_values( array_filter( array_map( 'sanitize_text_field', $data ), function( $hash ) {
-				return preg_match( '/^HASH:[a-f0-9]{64}$/', $hash ) === 1;
+				return preg_match( '/^HASH:([a-f0-9]{64}|SIMILAR:[a-f0-9]{19})$/', $hash ) === 1;
 			} ) );
 		}
 		if ( empty( $data ) ) {
@@ -2043,13 +2043,19 @@ class Meow_WPMC_Rest
 				array( 'status' => 404 ) ) );
 		}
 
-		// The group is keyed by the content hash the duplicate analysis stored as a reference.
-		$hash = $wpdb->get_var( $wpdb->prepare(
-			"SELECT originType FROM $table_refs
-			WHERE run_id = %d AND mediaUrl_hash = %s AND mediaUrl = %s AND originType LIKE 'HASH:%%'
-			LIMIT 1",
+		// The group is keyed by the content hash the duplicate analysis stored as a reference, and
+		// the similar images by the perceptual key stored next to it, when there is one.
+		$keys = $wpdb->get_col( $wpdb->prepare(
+			"SELECT DISTINCT originType FROM $table_refs
+			WHERE run_id = %d AND mediaUrl_hash = %s AND mediaUrl = %s AND originType LIKE 'HASH:%%'",
 			$run_id, hash( 'sha256', $entry->path ), $entry->path
 		) );
+		$hash = null;
+		$similar_key = null;
+		foreach ( $keys as $key ) {
+			if ( strpos( $key, 'HASH:SIMILAR:' ) === 0 ) $similar_key = $key;
+			else $hash = $key;
+		}
 		if ( !$hash ) {
 			return $this->error_response( new WP_Error( 'wpmc_duplicate_hash_missing',
 				__( 'This file was not hashed by the current scan, so its copies cannot be compared. Run a Duplicates scan.', 'media-cleaner' ),
@@ -2085,6 +2091,28 @@ class Meow_WPMC_Rest
 			$results[] = $this->build_duplicate_copy( (string) $copy->mediaUrl, (int) $copy->mediaId, $run_id );
 		}
 
+		// The images that look the same without being the same bytes: every image whose perceptual key
+		// is near this one (same test as the scan), minus the identical copies already above. Capped
+		// like the copies, for the same reason.
+		$similar = array();
+		$similar_total = 0;
+		if ( $similar_key ) {
+			$near = $this->engine->similar_keys_near( $similar_key );
+			$placeholders = implode( ',', array_fill( 0, count( $near ), '%s' ) );
+			$identical = array_flip( array_map( function ( $copy ) { return (string) $copy->mediaUrl; }, $copies ) );
+			$others = array_values( array_filter( $wpdb->get_results( $wpdb->prepare(
+				"SELECT mediaUrl, MAX(origin) AS mediaId FROM $table_refs
+				WHERE run_id = %d AND originType IN ($placeholders) AND mediaUrl IS NOT NULL
+				GROUP BY mediaUrl
+				ORDER BY mediaUrl ASC",
+				array_merge( array( $run_id ), $near )
+			) ), function ( $other ) use ( $identical ) { return !isset( $identical[ (string) $other->mediaUrl ] ); } ) );
+			$similar_total = count( $others );
+			foreach ( array_slice( $others, 0, 50 ) as $other ) {
+				$similar[] = $this->build_duplicate_copy( (string) $other->mediaUrl, (int) $other->mediaId, $run_id );
+			}
+		}
+
 		return new WP_REST_Response( array(
 			'success' => true,
 			'data' => array(
@@ -2092,6 +2120,8 @@ class Meow_WPMC_Rest
 				'currentId' => (int) $entry->id,
 				'total' => $total,
 				'copies' => $results,
+				'similarTotal' => $similar_total,
+				'similar' => $similar,
 			),
 		), 200 );
 	}
@@ -2321,15 +2351,17 @@ class Meow_WPMC_Rest
 	}
 
 	/**
-	 * Tells each duplicate row how many copies it shares its content with, in two queries for the
-	 * whole page. A duplicate on its own line means nothing; the size of its group is the first
+	 * Tells each duplicate row how many copies it shares its content with (itself included), and each
+	 * similar row how many other images look like it (the number its modal shows), in a few queries
+	 * for the whole page. A duplicate on its own line means nothing; the size of its group is the first
 	 * thing the user needs to see.
 	 */
 	private function attach_duplicate_counts( $entries, $run_id ) {
 		global $wpdb;
+		$wanted = array( 'DUPLICATE', 'SIMILAR' );
 		$paths = array();
 		foreach ( $entries as $entry ) {
-			if ( isset( $entry->issue ) && $entry->issue === 'DUPLICATE' ) {
+			if ( isset( $entry->issue ) && in_array( $entry->issue, $wanted, true ) ) {
 				$paths[ $entry->path ] = true;
 			}
 		}
@@ -2347,11 +2379,18 @@ class Meow_WPMC_Rest
 			array_merge( array( $run_id ), $path_hashes )
 		) );
 
-		$hash_by_path = array();
-		$hashes = array();
+		// The keys whose images make up each row's group: the content hash for a duplicate, every
+		// perceptual key near its own for a similar image.
+		$keys_by_path = array();
 		foreach ( $rows as $row ) {
-			$hash_by_path[ $row->mediaUrl ] = $row->originType;
-			$hashes[ $row->originType ] = true;
+			$issue = strpos( $row->originType, 'HASH:SIMILAR:' ) === 0 ? 'SIMILAR' : 'DUPLICATE';
+			$keys_by_path[ $row->mediaUrl ][ $issue ] = $issue === 'SIMILAR'
+				? $this->engine->similar_keys_near( $row->originType )
+				: array( $row->originType );
+		}
+		$hashes = array();
+		foreach ( $keys_by_path as $by_issue ) {
+			foreach ( $by_issue as $keys ) $hashes += array_flip( $keys );
 		}
 		if ( empty( $hashes ) ) {
 			return;
@@ -2370,12 +2409,15 @@ class Meow_WPMC_Rest
 			$copies_by_hash[ $count->originType ] = (int) $count->copies;
 		}
 
+		// Each image holds a single perceptual key, so adding the counts of the near keys counts
+		// every look-alike once.
 		foreach ( $entries as $entry ) {
-			if ( !isset( $entry->issue ) || $entry->issue !== 'DUPLICATE' ) {
+			if ( !isset( $entry->issue ) || !in_array( $entry->issue, $wanted, true ) ) {
 				continue;
 			}
-			$hash = isset( $hash_by_path[ $entry->path ] ) ? $hash_by_path[ $entry->path ] : null;
-			$entry->duplicates_count = $hash && isset( $copies_by_hash[ $hash ] ) ? $copies_by_hash[ $hash ] : 0;
+			$keys = isset( $keys_by_path[ $entry->path ][ $entry->issue ] ) ? $keys_by_path[ $entry->path ][ $entry->issue ] : array();
+			$count = array_sum( array_intersect_key( $copies_by_hash, array_flip( $keys ) ) );
+			$entry->duplicates_count = $entry->issue === 'SIMILAR' ? max( 0, $count - 1 ) : $count;
 		}
 	}
 

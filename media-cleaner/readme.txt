@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.3.5
+Stable tag: 7.3.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -49,7 +49,6 @@ This plugin is compatible with all media types, including retina and WebP versio
 
 == Screenshots ==
 
-
 1. After a scan, Media Cleaner lists the media your content doesn't use, with a preview, the reason it was flagged and its size.
 2. The References tab shows where each file is used, so you can see why it was kept.
 3. Deleted files go to a trash first. Recover them in one click, or empty the trash when you're sure.
@@ -57,6 +56,12 @@ This plugin is compatible with all media types, including retina and WebP versio
 5. Files you want to keep can be ignored, so they never come back in the results.
 
 == Changelog ==
+
+= 7.3.6 (2026/11/03) =
+* Add: Duplicate scan now finds visually similar images using perceptual hashing (dHash), with a sensitivity setting.
+* Add: Comparison tool to view duplicates side by side before deleting them.
+* Add: Support for BeBuilder.
+* Update: Error modals now include a link to the related documentation.
 
 = 7.3.5 (2026/10/30) =
 * Add: Storage page showing where the site's space goes and what can be cleaned.

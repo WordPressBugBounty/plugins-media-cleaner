@@ -62,7 +62,7 @@ class Meow_WPMC_MCP {
 					'method' => array(
 						'type' => 'string',
 						'enum' => array( 'media', 'files', 'duplicates' ),
-						'description' => 'media = list the Media Library and find entries not referenced in the content. files = walk the uploads folder and find files not referenced. duplicates = find files with identical content. Defaults to the method configured in the settings.',
+						'description' => 'media = list the Media Library and find entries not referenced in the content. files = walk the uploads folder and find files not referenced. duplicates = find files with identical content (and, in Pro, similar images). Defaults to the method configured in the settings.',
 					),
 					'content' => array(
 						'type' => 'boolean',
@@ -826,6 +826,7 @@ class Meow_WPMC_MCP {
 			'ORPHAN_RETINA' => 'This is a retina file whose original is missing.',
 			'ORPHAN_WEBP' => 'This is a WebP file whose original is missing.',
 			'DUPLICATE' => 'Another file has exactly the same content. Every unused copy is listed, the first one included, so choose which one to keep before deleting.',
+			'SIMILAR' => 'Another image looks the same (resized, re-compressed or re-encoded) without being the same file. Compare them before deleting: similar is not identical.',
 			'NOT_NEEDED_THUMB' => 'This thumbnail size is not registered by the theme or WordPress anymore.',
 		);
 		return isset( $codes[ $code ] ) ? $codes[ $code ] : $code;

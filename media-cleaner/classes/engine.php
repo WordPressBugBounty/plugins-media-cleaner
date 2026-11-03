@@ -3,6 +3,7 @@
 class Meow_WPMC_Engine {
 	private $core;
 	private $admin;
+	private $similar_index = null;
 
 	function __construct( $core, $admin ) {
 		$this->core = $core;
@@ -422,6 +423,7 @@ SQL;
 		$medias = $this->get_media_entries( $limit, $limitsize, false );
 		$processed = 0;
 		$yielded = false;
+		$detect_similar = $this->core->get_option( 'detect_similar' ) && $this->core->admin && $this->core->admin->is_pro_user();
 		$this->core->timeout_check_start( count( $medias ) );
 		foreach ( $medias as $media ) {
 			if ( $this->core->timeout_should_yield() ) {
@@ -455,6 +457,12 @@ SQL;
 			}
 			$path = $this->core->clean_uploaded_filename( $full_path );
 			$this->core->add_reference_url( $path, 'HASH:' . $hash, $media, array( 'force_cache' => true ) );
+			// Kept under the HASH: prefix on purpose: every query that tells real references from the
+			// duplicate analysis' bookkeeping already excludes HASH:, so this key can never make a file look used.
+			$similar_key = $detect_similar ? $this->similar_image_key( $media, $full_path ) : null;
+			if ( $similar_key ) {
+				$this->core->add_reference_url( $path, $similar_key, $media, array( 'force_cache' => true ) );
+			}
 			$this->core->timeout_check_additem();
 			$processed++;
 		}
@@ -495,6 +503,121 @@ SQL;
 			fclose( $handle );
 		}
 		return hash_final( $context );
+	}
+
+	// A perceptual key (dHash): the image shrunk to 9×8 pixels, one bit per pair of neighbours telling
+	// whether brightness rises. Resizing, re-compressing or re-encoding barely moves it, so the same
+	// picture uploaded at another size or quality gets the same key. The average colour is appended
+	// because dHash only sees brightness: the same layout in clearly different colours would collide.
+	// It only helps when the colour changes the whole image; a small recoloured detail still collides.
+	// Two keys are compared by how many of their 64 bits differ (see similar_keys_near()).
+	function similar_image_key( $media_id, $full_path ) {
+		if ( !function_exists( 'imagecreatefromstring' ) || !wp_attachment_is_image( $media_id ) ) return null;
+
+		// The medium size holds all the detail the key needs and is far cheaper to decode.
+		$medium = image_get_intermediate_size( $media_id, 'medium' );
+		$path = !empty( $medium['path'] ) ? trailingslashit( $this->core->upload_path ) . $medium['path'] : null;
+		if ( !$path || !is_file( $path ) ) $path = $full_path;
+
+		// Decoding takes about 5 bytes per pixel; a huge original without a medium size could exhaust memory.
+		$size = @getimagesize( $path );
+		if ( !$size || $size[0] * $size[1] > 25000000 ) return null;
+		$data = @file_get_contents( $path );
+		$image = $data !== false ? @imagecreatefromstring( $data ) : false;
+		if ( !$image ) return null;
+
+		// Transparent pixels are laid over white, so a transparent PNG and its flattened JPEG agree.
+		$small = imagecreatetruecolor( 9, 8 );
+		imagefill( $small, 0, 0, imagecolorallocate( $small, 255, 255, 255 ) );
+		imagecopyresampled( $small, $image, 0, 0, 0, 0, 9, 8, imagesx( $image ), imagesy( $image ) );
+		unset( $image );
+
+		$bits = '';
+		$sum = array( 0, 0, 0 );
+		for ( $y = 0; $y < 8; $y++ ) {
+			$previous = null;
+			for ( $x = 0; $x < 9; $x++ ) {
+				$rgb = imagecolorat( $small, $x, $y );
+				$channels = array( ( $rgb >> 16 ) & 0xFF, ( $rgb >> 8 ) & 0xFF, $rgb & 0xFF );
+				$sum[0] += $channels[0];
+				$sum[1] += $channels[1];
+				$sum[2] += $channels[2];
+				$luma = 0.299 * $channels[0] + 0.587 * $channels[1] + 0.114 * $channels[2];
+				if ( $previous !== null ) $bits .= $luma > $previous ? '1' : '0';
+				$previous = $luma;
+			}
+		}
+
+		// A flat or smoothly shaded image has almost no pattern, so every blank, solid or gradient
+		// image would share one key and be listed as similar to each other.
+		$ones = substr_count( $bits, '1' );
+		if ( $ones < 4 || $ones > 60 ) return null;
+
+		$key = '';
+		foreach ( str_split( $bits, 4 ) as $nibble ) {
+			$key .= dechex( bindec( $nibble ) );
+		}
+		foreach ( $sum as $total ) {
+			$key .= (string) ( (int) ( $total / 72 ) >> 5 );
+		}
+		return 'HASH:SIMILAR:' . $key;
+	}
+
+	// The keys close enough to this one, itself included. Resizing or re-encoding moves a key by 0 to
+	// 2 bits, a slight crop by 3 to 8; unrelated images are almost always 15 or more apart, which is
+	// why the tolerance stops at 12. The colour may move one step of eight per channel, not more.
+	// ponytail: compares the key with every key of the run, so the whole scan is quadratic (about
+	// 400M comparisons for 20,000 images). Upgrade path: index bands of the key to skip far ones.
+	function similar_keys_near( $key ) {
+		$index = $this->similar_index();
+		if ( !isset( $index[ $key ] ) ) return array( $key );
+		$tolerance = $this->similar_tolerance();
+		list( $high, $low, $red, $green, $blue ) = $index[ $key ];
+		$near = array();
+		foreach ( $index as $other => $parts ) {
+			if ( abs( $parts[2] - $red ) > 1 || abs( $parts[3] - $green ) > 1 || abs( $parts[4] - $blue ) > 1 ) continue;
+			if ( self::popcount32( $parts[0] ^ $high ) + self::popcount32( $parts[1] ^ $low ) <= $tolerance ) {
+				$near[] = $other;
+			}
+		}
+		return $near;
+	}
+
+	// The tolerance the results were scanned with, so the comparison modal draws the same groups as
+	// the scan did even after the setting moved. Runs older than the setting fall back to it.
+	function similar_tolerance() {
+		$run = $this->core->runs ? $this->core->runs->get( $this->core->get_run_id() ) : null;
+		$config = $run ? json_decode( (string) $run->config, true ) : null;
+		return isset( $config['similar_tolerance'] ) ? (int) $config['similar_tolerance'] : (int) $this->core->get_option( 'similar_tolerance' );
+	}
+
+	// Every perceptual key of the run, split into two 32-bit halves and the three colour steps.
+	// Loaded once per request: finding the neighbours of one key means looking at all of them.
+	private function similar_index() {
+		global $wpdb;
+		$run_id = $this->core->get_run_id();
+		if ( $this->similar_index === null || $this->similar_index['run_id'] !== $run_id ) {
+			$table = $wpdb->prefix . 'mclean_refs';
+			$keys = $this->get_col_or_fail( $wpdb->prepare(
+				"SELECT DISTINCT originType FROM $table WHERE run_id = %d AND originType LIKE 'HASH:SIMILAR:%%'",
+				$run_id
+			) );
+			$parsed = array();
+			foreach ( $keys as $key ) {
+				$hex = substr( $key, 13 );
+				$parsed[ $key ] = array( hexdec( substr( $hex, 0, 8 ) ), hexdec( substr( $hex, 8, 8 ) ),
+					(int) $hex[16], (int) $hex[17], (int) $hex[18] );
+			}
+			$this->similar_index = array( 'run_id' => $run_id, 'keys' => $parsed );
+		}
+		return $this->similar_index['keys'];
+	}
+
+	private static function popcount32( $x ) {
+		$x -= ( $x >> 1 ) & 0x55555555;
+		$x = ( $x & 0x33333333 ) + ( ( $x >> 2 ) & 0x33333333 );
+		$x = ( $x + ( $x >> 4 ) ) & 0x0F0F0F0F;
+		return ( ( $x * 0x01010101 ) & 0xFFFFFFFF ) >> 24;
 	}
 
 	// Parse the posts for references (based on $limit and $limitsize for paging the scan)
@@ -568,16 +691,19 @@ SQL;
 		STEP 2: List the media entries (or files)
 	*/
 
+	// Exact groups come before similar ones: check_duplicates() relies on it to leave a copy that is
+	// already a DUPLICATE out of the similar images. A similar key is returned even when no other image
+	// has it, since its neighbours carry keys of their own.
 	function get_hash_duplicates( $offset = 0, $limit = 100 ) {
-		// Get the hashes from the referenes ( unique ones ) 
+		// Get the hashes from the referenes ( unique ones )
 		global $wpdb;
 		$run_id = $this->core->get_run_id();
 		$table = $wpdb->prefix . 'mclean_refs';
 		$hashes = $wpdb->get_col( $wpdb->prepare(
 			"SELECT originType FROM $table
 			WHERE run_id = %d AND originType LIKE 'HASH:%%'
-			GROUP BY originType HAVING COUNT(DISTINCT mediaUrl) > 1
-			ORDER BY originType ASC LIMIT %d, %d",
+			GROUP BY originType HAVING COUNT(DISTINCT mediaUrl) > 1 OR originType LIKE 'HASH:SIMILAR:%%'
+			ORDER BY ( originType LIKE 'HASH:SIMILAR:%%' ) ASC, originType ASC LIMIT %d, %d",
 			$run_id,
 			max( 0, (int) $offset ),
 			max( 1, min( 500, (int) $limit ) )
@@ -692,7 +818,10 @@ SQL;
 
 		$medias = $wpdb->get_results( $request );
 
-		if ( count( $medias ) <= 1 ) {
+		// A similar image needs another image near its key, not one with the very same key. Only the
+		// images holding this key are decided here; each neighbour is decided with its own key.
+		$issue = strpos( $hash, 'HASH:SIMILAR:' ) === 0 ? 'SIMILAR' : 'DUPLICATE';
+		if ( $issue === 'SIMILAR' ? !$this->has_similar_image( $hash ) : count( $medias ) <= 1 ) {
 			return true;
 		}
 
@@ -725,9 +854,10 @@ SQL;
 			$path_hashes = array_map( function ( $media ) {
 				return hash( 'sha256', $this->core->clean_uploaded_filename( (string) $media->mediaUrl ) );
 			}, $chunk );
+			// Either issue counts: a copy listed as a DUPLICATE is not listed again as SIMILAR.
 			$placeholders = implode( ',', array_fill( 0, count( $path_hashes ), '%s' ) );
 			$stored += array_flip( $this->get_col_or_fail( $wpdb->prepare(
-				"SELECT path FROM $table_name_scan WHERE run_id = %d AND issue = 'DUPLICATE' AND path_hash IN ($placeholders)",
+				"SELECT path FROM $table_name_scan WHERE run_id = %d AND issue IN ('DUPLICATE', 'SIMILAR') AND path_hash IN ($placeholders)",
 				array_merge( array( $run_id ), $path_hashes )
 			) ) );
 		}
@@ -747,11 +877,22 @@ SQL;
 			if ( $may_yield && $added > 0 && $this->core->timeout_should_yield() ) {
 				return false;
 			}
-			$this->core->add_issue( $path, 'DUPLICATE' );
+			$this->core->add_issue( $path, $issue );
 			$added++;
 		}
 
 		return true;
+	}
+
+	private function has_similar_image( $key ) {
+		global $wpdb;
+		$near = $this->similar_keys_near( $key );
+		$placeholders = implode( ',', array_fill( 0, count( $near ), '%s' ) );
+		return count( $this->get_col_or_fail( $wpdb->prepare(
+			"SELECT DISTINCT mediaUrl FROM {$wpdb->prefix}mclean_refs
+			WHERE run_id = %d AND originType IN ($placeholders) AND mediaUrl IS NOT NULL LIMIT 2",
+			array_merge( array( $this->core->get_run_id() ), $near )
+		) ) ) > 1;
 	}
 
 	// A failed lookup must not read as "nothing references these copies": that would list used

@@ -238,6 +238,10 @@ class Meow_WPMC_Support {
       array_push( $unsupported, 'Bricks Builder' );
 		}
 
+		if ( defined( 'MFN_THEME_VERSION' ) ) {
+      array_push( $unsupported, 'BeBuilder' );
+		}
+
     // W3 Total Cache
     if ( defined( 'W3TC_VERSION' ) ) {
       array_push( $unsupported, 'W3 Total Cache' );

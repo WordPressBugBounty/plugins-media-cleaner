@@ -1570,7 +1570,7 @@ class Meow_WPMC_Core {
 			return new WP_Error( 'wpmc_private_storage_unsafe', __( 'Media Cleaner private storage cannot be a symbolic link.', 'media-cleaner' ) );
 		}
 		if ( !is_dir( $root ) && !wp_mkdir_p( $root ) ) {
-			return new WP_Error( 'wpmc_private_storage_unavailable', __( 'Media Cleaner could not create its private storage directory.', 'media-cleaner' ) );
+			return new WP_Error( 'wpmc_private_storage_unavailable', __( 'Media Cleaner could not create its private storage directory.', 'media-cleaner' ), array( 'help_url' => 'https://clean.thehiddendocs.com/common-issues/could-not-create-private-storage/' ) );
 		}
 		if ( !$this->protect_private_directory( $root ) ) return new WP_Error( 'wpmc_private_storage_unprotected', __( 'Media Cleaner could not protect its private storage directory.', 'media-cleaner' ) );
 		return $root;
@@ -4257,6 +4257,8 @@ class Meow_WPMC_Core {
 			'debuglogs' => true,
 			'images_only' => false,
 			'attach_is_use' => false,
+			'detect_similar' => true,
+			'similar_tolerance' => 6,
 			'thumbnails_only' => false,
 			'dirs_filter' => '',
 			'files_filter' => '',
@@ -4331,8 +4333,8 @@ class Meow_WPMC_Core {
 		$options = $this->get_all_options();
 		$config = is_array( $config ) ? $config : array();
 		$names = array(
-			'content', 'filesystem_content', 'media_library', 'images_only', 'attach_is_use',
-			'thumbnails_only', 'dirs_filter', 'files_filter', 'shortcodes_disabled',
+			'content', 'filesystem_content', 'media_library', 'images_only', 'attach_is_use', 'detect_similar',
+			'similar_tolerance', 'thumbnails_only', 'dirs_filter', 'files_filter', 'shortcodes_disabled',
 			'thumbnail_force_issues', 'posts_buffer', 'medias_buffer', 'analysis_buffer',
 			'uploads_file_buffer', 'refs_buffer', 'delay', 'analysis_document_limit',
 		);
@@ -4357,6 +4359,7 @@ class Meow_WPMC_Core {
 			'delay' => array( 0, 10000 ),
 			'refs_buffer' => array( 10, 1000 ),
 			'posts_per_page' => array( 5, 1000 ),
+			'similar_tolerance' => array( 0, 12 ),
 		);
 	}
 
@@ -4366,7 +4369,7 @@ class Meow_WPMC_Core {
 			'images_only', 'attach_is_use', 'thumbnails_only', 'hide_thumbnails', 'hide_warning',
 			'skip_trash', 'shortcodes_disabled', 'output_buffer_cleaning_disabled',
 			'php_error_logs', 'clean_uninstall', 'repair_mode', 'expert_mode',
-			'mcp_support',
+			'mcp_support', 'detect_similar',
 		);
 		if ( in_array( $name, $boolean_options, true ) ) {
 			return rest_sanitize_boolean( $value );
