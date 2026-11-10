@@ -2183,6 +2183,13 @@ class Meow_WPMC_Core {
 		}
 	}
 
+	// Read together, the similar-image keys of a scan tell which images look alike, and listing those is
+	// Pro. Without it they are left out of every view of the references (list, count, export, MCP).
+	// Compared with LEFT() rather than LIKE: the clause ends up inside prepare(), which reads % as a placeholder.
+	function hidden_refs_sql( $column = 'originType' ) {
+		return $this->admin->is_pro_user() ? '' : " AND LEFT( $column, 13 ) <> 'HASH:SIMILAR:'";
+	}
+
 	function get_issue( $id ) {
 		global $wpdb;
 		$table_name = $wpdb->prefix . "mclean_scan";
@@ -2374,6 +2381,12 @@ class Meow_WPMC_Core {
 		if ( !$was_deleted && ( !$this->runs || !$this->runs->cleanup_allowed() ) ) {
 			return new WP_Error( 'wpmc_cleanup_needs_scan',
 				__( 'Media Cleaner needs the results of a completed scan from this version before it can delete anything. Run a scan first. Your trash is untouched and can still be recovered or emptied.', 'media-cleaner' ) );
+		}
+
+		// A scan without Pro never lists look-alikes, but results from a scan made with Pro outlive a
+		// license that lapses. Trashing one stays Pro; what is already in the trash stays the user's.
+		if ( !$was_deleted && $issue->issue === 'SIMILAR' && !$this->admin->is_pro_user() ) {
+			return new WP_Error( 'wpmc_similar_needs_pro', __( 'Cleaning similar images is part of Media Cleaner Pro.', 'media-cleaner' ) );
 		}
 
 		$this->timed( 'forget_stale_trash_rows', function () use ( $id ) { $this->forget_stale_trash_rows( $id ); } );
@@ -4257,7 +4270,6 @@ class Meow_WPMC_Core {
 			'debuglogs' => true,
 			'images_only' => false,
 			'attach_is_use' => false,
-			'detect_similar' => true,
 			'similar_tolerance' => 6,
 			'thumbnails_only' => false,
 			'dirs_filter' => '',
@@ -4333,7 +4345,7 @@ class Meow_WPMC_Core {
 		$options = $this->get_all_options();
 		$config = is_array( $config ) ? $config : array();
 		$names = array(
-			'content', 'filesystem_content', 'media_library', 'images_only', 'attach_is_use', 'detect_similar',
+			'content', 'filesystem_content', 'media_library', 'images_only', 'attach_is_use',
 			'similar_tolerance', 'thumbnails_only', 'dirs_filter', 'files_filter', 'shortcodes_disabled',
 			'thumbnail_force_issues', 'posts_buffer', 'medias_buffer', 'analysis_buffer',
 			'uploads_file_buffer', 'refs_buffer', 'delay', 'analysis_document_limit',
@@ -4369,7 +4381,7 @@ class Meow_WPMC_Core {
 			'images_only', 'attach_is_use', 'thumbnails_only', 'hide_thumbnails', 'hide_warning',
 			'skip_trash', 'shortcodes_disabled', 'output_buffer_cleaning_disabled',
 			'php_error_logs', 'clean_uninstall', 'repair_mode', 'expert_mode',
-			'mcp_support', 'detect_similar',
+			'mcp_support',
 		);
 		if ( in_array( $name, $boolean_options, true ) ) {
 			return rest_sanitize_boolean( $value );

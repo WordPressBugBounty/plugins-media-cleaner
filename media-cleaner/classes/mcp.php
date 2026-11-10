@@ -769,7 +769,7 @@ class Meow_WPMC_MCP {
 		$found = array();
 		foreach ( array_slice( (array) $paths, 0, 20 ) as $path ) {
 			$rows = $wpdb->get_results( $wpdb->prepare(
-				"SELECT originType, origin FROM $table_refs WHERE run_id = %d AND mediaUrl = %s LIMIT 5",
+				"SELECT originType, origin FROM $table_refs WHERE run_id = %d AND mediaUrl = %s" . $this->core->hidden_refs_sql() . " LIMIT 5",
 				$run_id, $path
 			) );
 			foreach ( $rows as $row ) {
@@ -778,7 +778,7 @@ class Meow_WPMC_MCP {
 		}
 		if ( $issue->postId ) {
 			$rows = $wpdb->get_results( $wpdb->prepare(
-				"SELECT originType, origin FROM $table_refs WHERE run_id = %d AND mediaId = %d LIMIT 5",
+				"SELECT originType, origin FROM $table_refs WHERE run_id = %d AND mediaId = %d" . $this->core->hidden_refs_sql() . " LIMIT 5",
 				$run_id, (int) $issue->postId
 			) );
 			foreach ( $rows as $row ) {

@@ -1837,7 +1837,7 @@ class Meow_WPMC_Rest
 		// Every column is qualified with the r alias. Searching joins the posts table,
 		// and an unqualified id exists on both sides, which makes the query ambiguous
 		// and returns no reference at all.
-		$where_sql = $wpdb->prepare( 'AND r.run_id = %d', $run_id );
+		$where_sql = $wpdb->prepare( 'AND r.run_id = %d', $run_id ) . $this->core->hidden_refs_sql( 'r.originType' );
 		if ($referenceFilter === 'mediaIds') {
 			$where_sql .= ' AND r.mediaId IS NOT NULL';
 		} else if ($referenceFilter === 'mediaUrls') {
@@ -2108,11 +2108,14 @@ class Meow_WPMC_Rest
 				array_merge( array( $run_id ), $near )
 			) ), function ( $other ) use ( $identical ) { return !isset( $identical[ (string) $other->mediaUrl ] ); } ) );
 			$similar_total = count( $others );
-			foreach ( array_slice( $others, 0, 50 ) as $other ) {
+			// Without Pro the modal only says how many there are: seeing and comparing them is Pro.
+			$shown_others = $this->admin->is_pro_user() ? array_slice( $others, 0, 50 ) : array();
+			foreach ( $shown_others as $other ) {
 				$similar[] = $this->build_duplicate_copy( (string) $other->mediaUrl, (int) $other->mediaId, $run_id );
 			}
 		}
 
+		$run = $this->core->runs ? $this->core->runs->get( $run_id ) : null;
 		return new WP_REST_Response( array(
 			'success' => true,
 			'data' => array(
@@ -2122,6 +2125,10 @@ class Meow_WPMC_Rest
 				'copies' => $results,
 				'similarTotal' => $similar_total,
 				'similar' => $similar,
+				// Why a look-alike can be outside the results: the scan behind them ran without Pro and
+				// only counted them (see check_duplicates()). A Pro scan never counts, so above zero is proof.
+				'similarCountedWithoutPro' => $this->core->runs ? $this->core->runs->similar_found( $run_id ) : 0,
+				'scannedAt' => $run ? $run->finished_at : null,
 			),
 		), 200 );
 	}
@@ -2418,6 +2425,13 @@ class Meow_WPMC_Rest
 			$keys = isset( $keys_by_path[ $entry->path ][ $entry->issue ] ) ? $keys_by_path[ $entry->path ][ $entry->issue ] : array();
 			$count = array_sum( array_intersect_key( $copies_by_hash, array_flip( $keys ) ) );
 			$entry->duplicates_count = $entry->issue === 'SIMILAR' ? max( 0, $count - 1 ) : $count;
+			// A duplicate can also have look-alikes: the images near its perceptual key, minus its
+			// identical copies (same bytes, so same key). The same number the comparison modal shows,
+			// given without Pro too, since it says how many there are, not which.
+			if ( $entry->issue === 'DUPLICATE' && isset( $keys_by_path[ $entry->path ]['SIMILAR'] ) ) {
+				$near = array_sum( array_intersect_key( $copies_by_hash, array_flip( $keys_by_path[ $entry->path ]['SIMILAR'] ) ) );
+				$entry->similar_count = max( 0, $near - $count );
+			}
 		}
 	}
 
@@ -2723,11 +2737,11 @@ class Meow_WPMC_Rest
 		$table_ref = $wpdb->prefix . "mclean_refs";
 		$run_id = $this->core->get_run_id();
 		$posts_table = $wpdb->posts;
-		$filter_sql = '';
+		$filter_sql = $this->core->hidden_refs_sql( 'r.originType' );
 		if ($referenceFilter === 'mediaIds') {
-			$filter_sql = ' AND r.mediaId IS NOT NULL';
+			$filter_sql .= ' AND r.mediaId IS NOT NULL';
 		} else if ($referenceFilter === 'mediaUrls') {
-			$filter_sql = ' AND r.mediaUrl IS NOT NULL';
+			$filter_sql .= ' AND r.mediaUrl IS NOT NULL';
 		}
 		// The whole statement is prepared once: feeding an already prepared clause
 		// back into prepare() would treat the escaped search value as placeholders.
@@ -2795,6 +2809,8 @@ class Meow_WPMC_Rest
 			'trash' => $trash->entries,
 			'trash_size' => $trash->size,
 			'references' => $references,
+			// Similar images a scan without Pro counted but did not list (see check_duplicates()).
+			'similar_found' => $this->core->runs ? $this->core->runs->similar_found( $run_id ) : 0,
 		) ], 200 );
 	}
 
@@ -2853,7 +2869,7 @@ class Meow_WPMC_Rest
 
 		$rows = array();
 		if ( $section === 'references' ) {
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, mediaId, mediaUrl, originType, origin FROM $table_ref WHERE run_id = %d AND id > %d ORDER BY id ASC LIMIT %d", $run_id, $cursor, $limit ) );
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, mediaId, mediaUrl, originType, origin FROM $table_ref WHERE run_id = %d AND id > %d" . $this->core->hidden_refs_sql() . " ORDER BY id ASC LIMIT %d", $run_id, $cursor, $limit ) );
 		}
 		else {
 			$condition = $section === 'issues' ? 'ignored = 0 AND deleted = 0' : ( $section === 'ignored' ? 'ignored = 1' : 'deleted = 1' );

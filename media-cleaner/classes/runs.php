@@ -14,6 +14,8 @@ class Meow_WPMC_Runs {
 
 	private $core;
 	private $schema_ready = null;
+	// Similar images counted by this request and not yet saved (see add_similar_found()).
+	private $similar_pending = 0;
 
 	public function __construct( $core ) {
 		$this->core = $core;
@@ -301,6 +303,21 @@ class Meow_WPMC_Runs {
 		return $run;
 	}
 
+	// Similar images a scan without Pro found but did not list (see check_duplicates()). Held until
+	// the next checkpoint() and saved in the same write as the scan's position, so a batch that is
+	// interrupted and run again was never counted the first time.
+	// ponytail: a client that retries a batch whose checkpoint was saved but whose response was lost
+	// counts it twice. The number is only shown, never acted on.
+	public function add_similar_found( $count ) {
+		$this->similar_pending += (int) $count;
+	}
+
+	public function similar_found( $run_id ) {
+		$run = $this->get( $run_id );
+		$counters = $run ? $this->decode_json( $run->counters ) : array();
+		return isset( $counters['similar_found'] ) ? (int) $counters['similar_found'] : 0;
+	}
+
 	public function checkpoint( $run_id, $phase, $checkpoint = array(), $counters = null ) {
 		global $wpdb;
 		$run = $this->assert_writable( $run_id );
@@ -328,6 +345,9 @@ class Meow_WPMC_Runs {
 		if ( is_array( $counters ) ) {
 			$stored_counters = array_merge( $stored_counters, $counters );
 			$stored_counters['coverage'] = $coverage;
+		}
+		if ( $this->similar_pending > 0 ) {
+			$stored_counters['similar_found'] = ( isset( $stored_counters['similar_found'] ) ? (int) $stored_counters['similar_found'] : 0 ) + $this->similar_pending;
 		}
 
 		$phase_name = preg_replace( '/[^A-Za-z0-9_]/', '', (string) $phase );
@@ -358,12 +378,15 @@ class Meow_WPMC_Runs {
 			$current = $this->get( $run_id );
 			if ( !$current || $current->status !== $run->status ) return false;
 		}
+		$this->similar_pending = 0;
 		$this->refresh_lock( $run_id );
 		return true;
 	}
 
 	public function fail( $run_id, $code, $message, $details = array() ) {
 		global $wpdb;
+		// The batch that failed is run again, so what it counted must not reach a later checkpoint.
+		$this->similar_pending = 0;
 		$run = $this->get( $run_id );
 		if ( $run && $run->status === 'failed' ) return true;
 		if ( !$run || !in_array( $run->status, array( 'running', 'paused' ), true ) ) {
@@ -400,6 +423,7 @@ class Meow_WPMC_Runs {
 
 	public function pause( $run_id, $code, $message, $details = array() ) {
 		global $wpdb;
+		$this->similar_pending = 0; // Same as fail().
 		$run = $this->get( $run_id );
 		if ( !$run || !in_array( $run->status, array( 'running', 'paused' ), true ) ) return false;
 		$errors = $this->decode_json( $run->errors );

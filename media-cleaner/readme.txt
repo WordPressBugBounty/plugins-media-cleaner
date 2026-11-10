@@ -5,7 +5,7 @@ Donate link: https://www.patreon.com/meowapps
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 7.3.6
+Stable tag: 7.3.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -36,6 +36,7 @@ This plugin is compatible with all media types, including retina and WebP versio
 [Media Cleaner Pro](https://meowapps.com/media-cleaner/) adds extra features to the free version of Media Cleaner:
 
 * Filesystem Analysis: Scans your physical /uploads directory and matches it against the Media Library.
+* Similar Images: The Duplicates scan also lets you compare and clean images that look alike without being the same file (resized, cropped or re-saved). The free version counts them.
 * Extra support for complex plugins, such as ACF, Metabox, Divi Builder, Fusion Builder (Avada), WPBakery Page Builder, Visual Composer, Elementor, Beaver Builder, Brizy Builder, Oxygen Builder, Slider Revolution, Justified Image Grid, Avia Framework, and many more!
 * Live Site Scan: Analyzes the online version of your website, potentially improving accuracy in some cases.
 * WP-CLI support: Allows you to run the plugin at a higher speed or automatically with direct server access (via SSH).
@@ -56,6 +57,12 @@ This plugin is compatible with all media types, including retina and WebP versio
 5. Files you want to keep can be ignored, so they never come back in the results.
 
 == Changelog ==
+
+= 7.3.7 (2026/11/10) =
+* Add: Duplicates Scan is now available in the free version, with similarity detection remaining a Pro feature.
+* Update: Reworked the duplicates compare modal.
+* Update: Reworked the select sizes modal and clarified its wording to avoid misunderstandings.
+* Update: Synced the Meow Apps common library.
 
 = 7.3.6 (2026/11/03) =
 * Add: Duplicate scan now finds visually similar images using perceptual hashing (dHash), with a sensitivity setting.

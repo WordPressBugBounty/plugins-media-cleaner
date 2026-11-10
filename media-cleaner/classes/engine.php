@@ -423,7 +423,6 @@ SQL;
 		$medias = $this->get_media_entries( $limit, $limitsize, false );
 		$processed = 0;
 		$yielded = false;
-		$detect_similar = $this->core->get_option( 'detect_similar' ) && $this->core->admin && $this->core->admin->is_pro_user();
 		$this->core->timeout_check_start( count( $medias ) );
 		foreach ( $medias as $media ) {
 			if ( $this->core->timeout_should_yield() ) {
@@ -459,7 +458,9 @@ SQL;
 			$this->core->add_reference_url( $path, 'HASH:' . $hash, $media, array( 'force_cache' => true ) );
 			// Kept under the HASH: prefix on purpose: every query that tells real references from the
 			// duplicate analysis' bookkeeping already excludes HASH:, so this key can never make a file look used.
-			$similar_key = $detect_similar ? $this->similar_image_key( $media, $full_path ) : null;
+			// Similar images are part of every Duplicates scan; only seeing and acting on them is Pro
+			// (see check_duplicates()).
+			$similar_key = $this->similar_image_key( $media, $full_path );
 			if ( $similar_key ) {
 				$this->core->add_reference_url( $path, $similar_key, $media, array( 'force_cache' => true ) );
 			}
@@ -862,6 +863,10 @@ SQL;
 			) ) );
 		}
 
+		// Without Pro, similar images are found by the same analysis but only counted: comparing and
+		// cleaning them is Pro, so they never become issues that Delete All or the API could act on.
+		$count_only = $issue === 'SIMILAR' && !$this->core->admin->is_pro_user();
+
 		// Every copy in the group is reported, including the first one: the analysis describes what is
 		// on the disk, it does not decide what survives. A huge group can outlast the request, so with
 		// $may_yield it hands back after storing at least one copy, and the next request continues.
@@ -874,11 +879,19 @@ SQL;
 			if ( isset( $stored[ $this->core->clean_uploaded_filename( $path ) ] ) ) {
 				continue;
 			}
+			if ( $count_only ) {
+				$added++;
+				continue;
+			}
 			if ( $may_yield && $added > 0 && $this->core->timeout_should_yield() ) {
 				return false;
 			}
 			$this->core->add_issue( $path, $issue );
 			$added++;
+		}
+
+		if ( $count_only && $added > 0 && $this->core->runs ) {
+			$this->core->runs->add_similar_found( $added );
 		}
 
 		return true;
